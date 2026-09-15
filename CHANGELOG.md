@@ -1,5 +1,12 @@
 # Changelog
 
+### v2.2.1
+
+#### Features
+
+* Wider analysis levels: the right-click menu on Run analysis now offers Normal, -50s, -1g and -2g loss tolerances.
+* Detail window links go straight to the item (wiki article, gw2efficiency calculator page, gw2bltc item page) instead of search pages.
+
 ### v2.2.0
 
 #### Features
