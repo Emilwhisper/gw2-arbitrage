@@ -45,6 +45,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
 
+      - name: Install system dependencies (GTK for rfd/eframe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
