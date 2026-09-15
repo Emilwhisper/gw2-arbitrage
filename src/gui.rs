@@ -543,9 +543,20 @@ impl App {
                         break;
                     };
                     let v = runtime
-                        .block_on(velocity::fetch_velocity(id, fetch_hourly, fetch_daily))
+                        .block_on(velocity::fetch_velocity_cached(
+                            &crate::config::CONFIG.cache_dir,
+                            id,
+                            fetch_hourly,
+                            fetch_daily,
+                        ))
                         .ok();
-                    let _ = tx.send(Event::VelocityLoaded(id, v, fetch_hourly, fetch_daily));
+                    // the cache may have supplied a group without a request, so
+                    // trust the flags returned by the fetch, not the requested ones
+                    let (v, got_hourly, got_daily) = match v {
+                        Some((v, h, d)) => (Some(v), h, d),
+                        None => (None, false, false),
+                    };
+                    let _ = tx.send(Event::VelocityLoaded(id, v, got_hourly, got_daily));
                 }
             });
         }

@@ -11,11 +11,12 @@
 //! Multi-ID requests are NOT supported (verified empirically), so this module
 //! fetches one item at a time; the GUI batches calls across worker threads.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Sell velocity per trailing window, in units/day.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Velocity {
     pub h6: Option<f64>,
     pub h12: Option<f64>,
@@ -33,6 +34,52 @@ pub struct Velocity {
 struct Bucket {
     date: String,
     sell_sold: f64,
+}
+
+/// How long cached velocity data stays fresh (24 hours).
+pub const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// On-disk velocity cache entry, one file per item.
+#[derive(Serialize, Deserialize)]
+struct CachedVelocity {
+    fetched_at: i64,
+    /// which endpoint groups the cached values cover
+    hourly: bool,
+    daily: bool,
+    velocity: Velocity,
+}
+
+/// Path of the per-item velocity cache file (`velocity_<item_id>.json`).
+pub fn cache_path(cache_dir: &Path, item_id: u32) -> PathBuf {
+    cache_dir.join(format!("velocity_{}.json", item_id))
+}
+
+/// Load a fresh (within `CACHE_TTL_SECS`) cache entry, if any.
+fn load_cache(cache_dir: &Path, item_id: u32) -> Option<CachedVelocity> {
+    let text = std::fs::read_to_string(cache_path(cache_dir, item_id)).ok()?;
+    let cached: CachedVelocity = serde_json::from_str(&text).ok()?;
+    if now_unix() - cached.fetched_at > CACHE_TTL_SECS {
+        return None;
+    }
+    Some(cached)
+}
+
+/// Persist velocity values for an item.
+fn save_cache(cache_dir: &Path, item_id: u32, v: &Velocity, hourly: bool, daily: bool) {
+    let cached = CachedVelocity {
+        fetched_at: now_unix(),
+        hourly,
+        daily,
+        velocity: *v,
+    };
+    let Ok(text) = serde_json::to_string(&cached) else {
+        return;
+    };
+    let path = cache_path(cache_dir, item_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, text);
 }
 
 const BASE_URL: &str = "https://api.datawars2.ie/gw2/v2/history";
@@ -202,4 +249,61 @@ pub async fn fetch_velocity(
     }
 
     Ok(v)
+}
+
+/// Fetch sell velocity, reusing the on-disk cache when it is still fresh
+/// (`CACHE_TTL_SECS`). Returns the velocity plus which endpoint groups the
+/// returned values cover, so the caller can merge them with groups it already
+/// has (and remember what does not need fetching again).
+///
+/// `fetch_hourly` / `fetch_daily` are requests, not demands: a group that is
+/// already present in a fresh cache entry is not downloaded again. On a network
+/// failure the cached values are used when available.
+pub async fn fetch_velocity_cached(
+    cache_dir: &Path,
+    item_id: u32,
+    fetch_hourly: bool,
+    fetch_daily: bool,
+) -> Result<(Velocity, bool, bool), String> {
+    let cached = load_cache(cache_dir, item_id);
+    let have_hourly = cached.as_ref().is_some_and(|c| c.hourly);
+    let have_daily = cached.as_ref().is_some_and(|c| c.daily);
+    let cached_velocity = cached.as_ref().map(|c| c.velocity);
+    let need_hourly = fetch_hourly && !have_hourly;
+    let need_daily = fetch_daily && !have_daily;
+    let out_hourly = have_hourly || need_hourly;
+    let out_daily = have_daily || need_daily;
+
+    if !need_hourly && !need_daily {
+        return match cached {
+            Some(c) => Ok((c.velocity, out_hourly, out_daily)),
+            None => Ok((Velocity::default(), false, false)),
+        };
+    }
+
+    match fetch_velocity(item_id, need_hourly, need_daily).await {
+        Ok(fresh) => {
+            let mut merged = cached_velocity.unwrap_or_default();
+            if need_hourly {
+                merged.h6 = fresh.h6;
+                merged.h12 = fresh.h12;
+                merged.h24 = fresh.h24;
+            }
+            if need_daily {
+                merged.d7 = fresh.d7;
+                merged.w2 = fresh.w2;
+                merged.m1 = fresh.m1;
+                merged.m3 = fresh.m3;
+                merged.m6 = fresh.m6;
+                merged.y1 = fresh.y1;
+                merged.y2 = fresh.y2;
+            }
+            save_cache(cache_dir, item_id, &merged, out_hourly, out_daily);
+            Ok((merged, out_hourly, out_daily))
+        }
+        Err(e) => match cached_velocity {
+            Some(v) => Ok((v, out_hourly, out_daily)),
+            None => Err(e),
+        },
+    }
 }

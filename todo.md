@@ -56,6 +56,6 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Sell-velocity columns (6h / 12h / 24h / 7d / 2w / 1m / 3m / 6m / 1y / 2y, units/day) fetched from `https://api.datawars2.ie/gw2/v2/history/…` (see new `src/velocity.rs`), with per-window coverage checks (≥80% of expected buckets, else "–"), 4 background worker threads, and sortable columns.
 - [x] Table rework: clickable column headers sort the table (click again to flip direction), full-window width via `egui_extras::TableBuilder` (resizable columns, name column takes remaining space).
 - [x] Settings → "Velocity windows": each window (6h → 2y) can be enabled/disabled; disabled windows hide their column. Choices are remembered in `gui_prefs.json`. Disabling **all** hourly (or all daily) windows skips that endpoint entirely per item; otherwise extra windows cost no extra requests, so there is no note about speed in the UI. Enabling a window later back-fills it without re-running the analysis.
-- [ ] Show velocity in the item detail window (per-window units/day + confidence).
-- [ ] Disk-cache velocity results (TTL ~1 day) so re-running the analysis doesn't refetch every item.
+- [x] Show velocity in the item detail window (per-window units/day for the enabled windows; on-demand fetch when the background workers have not reached that item yet).
+- [x] Disk-cache velocity results (TTL ~1 day) so re-running the analysis doesn't refetch every item.
 - [ ] Background auto-refresh of the list on a timer.

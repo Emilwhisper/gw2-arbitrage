@@ -129,9 +129,11 @@ New/changed modules:
   - Coverage check: a window needs ≥80% of its expected buckets, else it reports `None` (shown as "–" in the GUI).
   - GUI Settings → "Velocity windows" toggles each window's column (6h…2y, all on by default); the selection is persisted under `velocity_windows` in `gui_prefs.json`. Disabling every hourly (or every daily) window skips that whole endpoint for each item — one request per item per endpoint — while extra windows inside an enabled group cost no additional requests.
   - Results are merged per endpoint group: `velocity_hourly_done` / `velocity_daily_done` record what was fetched per item, so enabling a window later (Settings) back-fills it without re-running the analysis and without discarding the other group's values.
+  - **Disk cache:** `fetch_velocity_cached(cache_dir, item_id, fetch_hourly, fetch_daily)` wraps `fetch_velocity` and stores results as `velocity_<item_id>.json` (serde_json: `fetched_at`, `hourly`, `daily`, `velocity`) with a 24h TTL (`CACHE_TTL_SECS`). Fresh entries are reused, only missing groups are downloaded, and cached values are used as a fallback on network errors. Files are named `velocity_*` so they survive `flush_cache` (which only removes `cache_*` files).
+  - The item detail window lists the velocity of every enabled window for that item, and fetches it on demand (`request_item_velocity`) when the item has not been processed by the workers yet.
 - Cargo.toml additions: `eframe 0.27`, `egui_extras 0.27` (TableBuilder for the sortable, resizable, full-width table), `image 0.25` (png only), `rfd 0.12`.
 
-Remaining known gaps (see `todo.md`): `--count` / `--include-ascended` are still startup-only (global `CONFIG`); TP order book display; wallet auto-conversion; velocity disk-cache + velocity in the detail window; the console window still appears in GUI mode (intentionally kept for now).
+Remaining known gaps (see `todo.md`): TP order book display; wallet auto-conversion; background auto-refresh; feature parity extras (material-bank awareness, `--include-ascended` / `--count` are now in the Settings UI).
 
 - `lib.rs` already exports everything (`pub mod ...`), so a GUI binary can reuse the data loading, crafting cost, and profit functions directly.
 - Coupling points to be aware of:
