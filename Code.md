@@ -116,7 +116,7 @@ New/changed modules:
   - `reset_data_files()` — deletes the cached items/recipes data files (icons + favorites preserved).
 - `src/icons.rs` — icon disk cache (`icons/<item_id>.png` under the cache dir), `get_icon(item_id, icon_url, notify) -> Option<PathBuf>`, atomic `.tmp`+rename writes, permanent (never expires).
 - `src/favorites.rs` — favorites persistence: `load()` / `save(&HashSet<u32>)` as `favorites.json` in the cache dir.
-- `src/config.rs` — new `--cli` flag stored in `CONFIG.cli`; `CONFIG.icons_dir` added.
+- `src/config.rs` — new `--cli` flag stored in `CONFIG.cli`; `CONFIG.icons_dir` added; `INCLUDE_TIMEGATED` atomic (CLI flag OR `include_timegated` key in the TOML config) read live by `crafting.rs` so the GUI toggle applies to the next analysis run; GUI Settings writes both `api_key` and `include_timegated` back to the TOML config file.
 - `src/main.rs` — mode switch: **no arguments → GUI** (`gui::run()`); `--cli` or any arguments → console mode (`run_cli()`), unchanged behavior.
 - `src/gui.rs` — egui/eframe 0.27 app:
   - Toolbar: "Run analysis", "Reset cache & re-run", "Export CSV…" (rfd save dialog, same columns as CLI), status/spinner.
