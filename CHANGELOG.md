@@ -1,5 +1,12 @@
 # Changelog
 
+### v2.1.1
+
+#### Fixes
+
+* Survive transient GW2 API failures (CDN error pages, throttling) with retries, backoff and full error context instead of a contextless parse error killing the whole scan.
+* Faster scans: shared HTTP client with connection reuse and parallel listing batches.
+
 ### v2.1.0
 
 #### Features
