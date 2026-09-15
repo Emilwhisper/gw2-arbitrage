@@ -1554,6 +1554,12 @@ impl App {
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            // keep the table at full panel width so the horizontal scrollbar
+            // is always docked at the window's right edge: with auto-shrink
+            // on x the table would only be as wide as its content, pushing
+            // the scrollbar off-screen (columns too wide) or mid-window
+            // (columns too narrow). y stays shrunk (today's vertical behavior).
+            .auto_shrink([false, true])
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto())
             .column(Column::auto());
