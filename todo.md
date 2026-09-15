@@ -5,7 +5,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 ## Phase 0 — Refactor for GUI readiness
 - [x] Retain the `icon` URL in `Item` (from `/v2/items`) instead of dropping it in the `ApiItem → Item` conversion (`#[serde(default)]` so old cached item DBs still parse; may require a one-time items re-download / cache bump).
 - [x] Extract data loading + profit pipeline from `main.rs` into library functions returning structured data (e.g. `Analysis { items, recipes, profitable_items }`) instead of printing directly.
-- [ ] Reduce reliance on the global `CONFIG` (pass `CraftingOptions` / settings as parameters where practical), or document that the GUI must initialize `CONFIG` at startup. **Partly done:** `INCLUDE_TIMEGATED` is now a live atomic backed by the TOML config; `count` / `include_ascended` still need the same treatment.
+- [x] Reduce reliance on the global `CONFIG` for the mutable crafting options: `INCLUDE_TIMEGATED`, `INCLUDE_ASCENDED` and `COUNT_LIMIT` are live atomics (CLI flag OR TOML key) read at calculation time, so GUI Settings changes apply to the next run. Remaining: the read-only paths (paths, languages, blacklists) are still only initialised once at startup, which is fine for a GUI launched from the same config.
 - [x] Add `--cli` flag / argument detection so the single binary can run in either console or GUI mode. (No args or `--cli` absent logic: no args → GUI; `--cli` or any arguments → CLI.)
 - [x] Icon caching: new `icons.rs` library module — `get_icon(item_id, url, notify) -> Option<PathBuf>` (check disk → download PNG → save → return path). Uses `CONFIG.icons_dir` (`<cache-dir>\icons`).
   - [x] Store raw PNGs in a permanent `icons/` subfolder of the cache dir (`...\gw2-arbitrage\icons\<item_id>.png`); icons are immutable, no expiry, and `flush_cache` only deletes `cache_*` files so they survive `--reset-cache`.
@@ -22,7 +22,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Clicking a row opens a detail window (shopping list, sell-at/breakeven, unknown-recipe warning).
 - [x] Filters matching CLI options: disciplines multi-select.
 - [x] Timegated include toggle (Settings → persisted to `gw2-arbitrage.toml`, applied live via `config::INCLUDE_TIMEGATED`).
-- [ ] `--count` limit and `--include-ascended` toggle as runtime settings (needs the `CONFIG` refactor above).
+- [x] `--count` limit and `--include-ascended` toggle as runtime settings (Settings window → `config::COUNT_LIMIT` / `config::INCLUDE_ASCENDED` atomics + TOML persistence, applied on the next analysis run).
 - [x] CSV export button (`--output-csv` equivalent) with a native save-file dialog, same columns as CLI output.
 - [x] "Refresh cache / reset cache" button (`--reset-cache` equivalent) via `analysis::reset_data_files()` (deletes items/recipes data, keeps icons + favorites).
 
