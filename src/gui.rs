@@ -71,6 +71,32 @@ struct App {
     detail_open: bool,
     detail_loading: bool,
     detail: Option<DetailData>,
+    show_settings: bool,
+    api_key_input: String,
+    prefs_dirty: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct GuiPrefs {
+    sort_by_profit_desc: Option<bool>,
+    favorites_only: Option<bool>,
+    disciplines: Option<Vec<String>>,
+}
+
+const GUI_PREFS_FILE: &str = "gui_prefs.json";
+
+fn load_gui_prefs() -> GuiPrefs {
+    let path = crate::config::CONFIG.cache_dir.join(GUI_PREFS_FILE);
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_gui_prefs(prefs: &GuiPrefs) -> Result<(), String> {
+    let path = crate::config::CONFIG.cache_dir.join(GUI_PREFS_FILE);
+    let json = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
 type DetailData = (
@@ -102,7 +128,11 @@ impl App {
             detail_open: false,
             detail_loading: false,
             detail: None,
+            show_settings: false,
+            api_key_input: crate::config::CONFIG.api_key.clone().unwrap_or_default(),
+            prefs_dirty: false,
         }
+        .with_prefs(load_gui_prefs())
     }
 
     fn spawn_analysis(&mut self) {
@@ -210,6 +240,71 @@ impl App {
             }
             self.favorites_dirty = false;
         }
+    }
+
+    fn with_prefs(mut self, prefs: GuiPrefs) -> Self {
+        if let Some(v) = prefs.sort_by_profit_desc {
+            self.sort_by_profit_desc = v;
+        }
+        if let Some(v) = prefs.favorites_only {
+            self.favorites_only = v;
+        }
+        if let Some(disciplines) = prefs.disciplines {
+            self.discipline_filter = disciplines
+                .iter()
+                .filter_map(|d| d.parse::<config::Discipline>().ok())
+                .collect();
+        }
+        self
+    }
+
+    fn flush_prefs(&mut self) {
+        if self.prefs_dirty {
+            let prefs = GuiPrefs {
+                sort_by_profit_desc: Some(self.sort_by_profit_desc),
+                favorites_only: Some(self.favorites_only),
+                disciplines: Some(
+                    self.discipline_filter
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect(),
+                ),
+            };
+            if let Err(e) = save_gui_prefs(&prefs) {
+                self.status = format!("Failed to save GUI settings: {}", e);
+            }
+            self.prefs_dirty = false;
+        }
+    }
+
+    fn save_api_key(&mut self) {
+        let path = crate::config::CONFIG.config_file_path.clone();
+        let key = self.api_key_input.trim().to_string();
+        let result = (|| -> Result<(), String> {
+            let mut table: toml::Value = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok())
+                .unwrap_or_else(|| toml::Value::Table(Default::default()));
+            if let Some(t) = table.as_table_mut() {
+                if key.is_empty() {
+                    t.remove("api_key");
+                } else {
+                    t.insert("api_key".into(), toml::Value::String(key));
+                }
+            }
+            let out = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&path, out).map_err(|e| e.to_string())
+        })();
+        self.status = match result {
+            Ok(_) => format!(
+                "Saved API key to {}. Restart the app to apply it.",
+                path.display()
+            ),
+            Err(e) => format!("Failed to save config: {}", e),
+        };
     }
 
     fn export_csv(&mut self) {
@@ -341,6 +436,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
         self.flush_favorites();
+        self.flush_prefs();
 
         // keep repainting while background work is running
         if self.running || self.detail_loading || !self.pending_icons.is_empty() {
@@ -366,6 +462,10 @@ impl eframe::App for App {
                         }
                     },
                 );
+                ui.separator();
+                if ui.button("Settings").clicked() {
+                    self.show_settings = true;
+                }
                 if self.running {
                     ui.spinner();
                 }
@@ -395,6 +495,34 @@ impl eframe::App for App {
                 });
             self.detail_open = open;
         }
+
+        if self.show_settings {
+            let mut open = self.show_settings;
+            egui::Window::new("Settings")
+                .open(&mut open)
+                .default_width(500.0)
+                .show(ctx, |ui| {
+                    ui.label("Guild Wars 2 API key (needs the \"unlocks\" scope).");
+                    ui.label("Enables the \"you may not know these recipes\" warnings.");
+                    ui.add_space(4.0);
+                    ui.text_edit_singleline(&mut self.api_key_input);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.save_api_key();
+                        }
+                        if ui.button("Close").clicked() {
+                            self.show_settings = false;
+                        }
+                    });
+                    ui.separator();
+                    ui.small(format!(
+                        "Config file: {}",
+                        crate::config::CONFIG.config_file_path.display()
+                    ));
+                });
+            self.show_settings = open;
+        }
     }
 }
 
@@ -402,8 +530,15 @@ impl App {
     fn show_item_list(&mut self, ui: &mut egui::Ui, analysis: &Analysis) {
         // filters
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.sort_by_profit_desc, "Sort by profit (high → low)");
-            ui.checkbox(&mut self.favorites_only, "★ only");
+            let mut sort_desc = self.sort_by_profit_desc;
+            let mut favs_only = self.favorites_only;
+            ui.checkbox(&mut sort_desc, "Sort by profit (high → low)");
+            ui.checkbox(&mut favs_only, "★ only");
+            if sort_desc != self.sort_by_profit_desc || favs_only != self.favorites_only {
+                self.sort_by_profit_desc = sort_desc;
+                self.favorites_only = favs_only;
+                self.prefs_dirty = true;
+            }
             ui.separator();
             ui.label("Disciplines:");
             for variant in [
@@ -426,6 +561,7 @@ impl App {
                     } else {
                         self.discipline_filter.retain(|d| *d != discipline);
                     }
+                    self.prefs_dirty = true;
                 }
             }
         });

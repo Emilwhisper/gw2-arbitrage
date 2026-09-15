@@ -45,6 +45,7 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub cli: bool,
     pub icons_dir: PathBuf,
+    pub config_file_path: PathBuf,
     pub api_recipes_file: PathBuf,
     pub custom_recipes_file: PathBuf,
     pub items_file: PathBuf,
@@ -84,6 +85,8 @@ impl Config {
                 ConfigFile::default()
             }
         };
+        config.config_file_path = config_file(&opt.config_file)
+            .unwrap_or_else(|_| PathBuf::from("gw2-arbitrage.toml"));
 
         config.api_key = file.api_key;
 
