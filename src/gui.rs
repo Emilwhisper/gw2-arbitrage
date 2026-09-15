@@ -1044,6 +1044,7 @@ impl eframe::App for App {
 
         if self.show_settings {
             let mut open = self.show_settings;
+            let mut close_settings = false;
             egui::Window::new("Settings")
                 .open(&mut open)
                 .default_width(500.0)
@@ -1154,10 +1155,12 @@ impl eframe::App for App {
 
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
-                            // NOTE: set `open`, not `self.show_settings`: the
-                            // trailing `self.show_settings = open` below would
-                            // otherwise overwrite this and reopen the window
-                            open = false;
+                            // NOTE: flag a separate local instead of touching
+                            // `open` here: `open` is mutably borrowed by
+                            // `.open(&mut open)` for the whole `.show()` call,
+                            // so the closure cannot borrow it too (E0499).
+                            // The flag is applied after `.show()` returns.
+                            close_settings = true;
                         }
                     });
                     ui.separator();
@@ -1166,6 +1169,9 @@ impl eframe::App for App {
                         crate::config::CONFIG.config_file_path.display()
                     ));
                 });
+            if close_settings {
+                open = false;
+            }
             self.show_settings = open;
         }
 
@@ -1179,6 +1185,7 @@ impl eframe::App for App {
 
         if self.show_filters {
             let mut open = self.show_filters;
+            let mut close_filters = false;
             egui::Window::new("Filters")
                 .open(&mut open)
                 .default_width(420.0)
@@ -1306,15 +1313,18 @@ impl eframe::App for App {
                                     format!("Filters applied ({} active)", n)
                                 };
                             }
-                            open = false;
+                            close_filters = true;
                         }
                         if ui.button("Close").clicked() {
                             // discard edits that were never applied
                             self.filter_draft = self.filter_saved.clone();
-                            open = false;
+                            close_filters = true;
                         }
                     });
                 });
+            if close_filters {
+                open = false;
+            }
             if !open {
                 // the window X behaves like Close: discard un-applied edits
                 // (no-op after Apply, which already saved the drafts)
