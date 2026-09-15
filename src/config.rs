@@ -43,6 +43,7 @@ pub struct Config {
     pub rn: Option<Rational32>,
 
     pub cache_dir: PathBuf,
+    pub icons_dir: PathBuf,
     pub api_recipes_file: PathBuf,
     pub custom_recipes_file: PathBuf,
     pub items_file: PathBuf,
@@ -149,7 +150,11 @@ impl Config {
             Err(e) => println!("Failed to flush cache dir {}: {}", &cache_dir.display(), e),
             _ => (),
         }
-        config.cache_dir = cache_dir;
+        config.cache_dir = cache_dir.clone();
+
+        let mut icons_dir = cache_dir;
+        icons_dir.push("icons");
+        config.icons_dir = icons_dir;
 
         let data_dir = data_dir(&opt.data_dir).expect("Failed to identify data dir");
         ensure_dir(&data_dir).expect("Failed to create data dir");

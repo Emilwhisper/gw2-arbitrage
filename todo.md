@@ -7,7 +7,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [ ] Extract data loading + profit pipeline from `main.rs` into library functions returning structured data (e.g. `Analysis { items, recipes, profitable_items }`) instead of printing directly.
 - [ ] Reduce reliance on the global `CONFIG` (pass `CraftingOptions` / settings as parameters where practical), or document that the GUI must initialize `CONFIG` at startup.
 - [ ] Add `--cli` flag / argument detection so the single binary can run in either console or GUI mode.
-- [ ] Icon caching: new `icons.rs` library module — `get_icon(item_id, url, icons_dir) -> Option<PathBuf>` (check disk → download PNG → save → return path).
+- [x] Icon caching: new `icons.rs` library module — `get_icon(item_id, url, notify) -> Option<PathBuf>` (check disk → download PNG → save → return path). Uses `CONFIG.icons_dir` (`<cache-dir>\icons`).
   - [ ] Store raw PNGs in a permanent `icons/` subfolder of the cache dir (`...\gw2-arbitrage\icons\<item_id>.png`); icons are immutable, no expiry, and `flush_cache` only deletes `cache_*` files so they survive `--reset-cache`.
   - [ ] Lazy/on-demand download for displayed rows + detail window (avoids 60k+ downloads on first run).
   - [ ] In-memory LRU/HashMap of decoded images so egui doesn't re-read files per frame.
