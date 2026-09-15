@@ -210,6 +210,9 @@ struct App {
     /// human-readable names for the detail's unknown recipes, resolved once
     /// per item open (raw recipe ids are useless in the UI)
     detail_unknown_names: Vec<String>,
+    /// per-item forced acquisition source for the detail tree estimate
+    /// (cleared on every new item); the exact panel above is unaffected
+    detail_source_overrides: HashMap<u32, crafting::Source>,
     show_settings: bool,
     show_filters: bool,
     /// Draft values edited in the Filters window (persisted on Apply).
@@ -260,6 +263,142 @@ fn url_slug(name: &str, separator: char) -> String {
 /// Wiki article slug for an item name (canonical underscore form).
 fn wiki_slug(name: &str) -> String {
     url_slug(name, '_')
+}
+
+/// TP unit price for the estimate: asks when instant, bids when patient.
+/// Returns None when that side of the book is empty.
+fn tp_unit_price(item_id: u32, prices: &HashMap<u32, api::Price>, patient: bool) -> Option<Money> {
+    prices.get(&item_id).and_then(|price| {
+        let info = if patient { &price.buys } else { &price.sells };
+        (info.quantity > 0).then(|| Money::from_copper(info.unit_price as i32))
+    })
+}
+
+/// Vendor/token unit price, if the item is obtainable that way at all.
+fn vendor_unit_price(item: &Item) -> Option<Money> {
+    item.vendor_cost()
+        .map(|(cost, _)| cost)
+        .or_else(|| item.token_value())
+}
+
+/// Source override selector for one tree row: standalone function (not a
+/// closure) so it can be called from inside other UI closures without
+/// borrow conflicts. Returns the newly picked source when the user changed
+/// it; `current` is the pinned override if any, else the display default.
+fn source_selector(
+    ui: &mut egui::Ui,
+    item_id: u32,
+    can_buy: bool,
+    can_craft: bool,
+    can_vendor: bool,
+    current: Option<crafting::Source>,
+) -> Option<crafting::Source> {
+    let mut selected = current;
+    egui::ComboBox::from_id_source(format!("override-{item_id}"))
+        .selected_text(match selected {
+            Some(crafting::Source::TradingPost) => "Buy (TP)",
+            Some(crafting::Source::Crafting) => "Craft",
+            Some(crafting::Source::Vendor) => "Vendor",
+            None => "—",
+        })
+        .show_ui(ui, |ui| {
+            if can_buy {
+                ui.selectable_value(
+                    &mut selected,
+                    Some(crafting::Source::TradingPost),
+                    "Buy (TP)",
+                );
+            }
+            if can_craft {
+                ui.selectable_value(&mut selected, Some(crafting::Source::Crafting), "Craft");
+            }
+            if can_vendor {
+                ui.selectable_value(&mut selected, Some(crafting::Source::Vendor), "Vendor");
+            }
+        });
+    if selected != current {
+        selected
+    } else {
+        None
+    }
+}
+
+/// Estimated total cost for `count` units of an item under source overrides.
+///
+/// Unlike the exact panel (which walks order books unit by unit), this uses
+/// top-of-book unit prices, vendor list prices and recursive sub-crafting —
+/// fast and network-free, but blind to book depth. Returns None when the
+/// forced combination is unobtainable.
+fn estimate_override_cost(
+    item_id: u32,
+    count: u32,
+    overrides: &HashMap<u32, crafting::Source>,
+    analysis: &Analysis,
+    prices: &HashMap<u32, api::Price>,
+    patient: bool,
+) -> Option<Money> {
+    if let Some(&forced) = overrides.get(&item_id) {
+        return match forced {
+            crafting::Source::TradingPost => {
+                tp_unit_price(item_id, prices, patient).map(|u| u * count)
+            }
+            crafting::Source::Vendor => analysis
+                .items_map
+                .get(&item_id)
+                .and_then(vendor_unit_price)
+                .map(|u| u * count),
+            crafting::Source::Crafting => {
+                estimate_craft_cost(item_id, count, overrides, analysis, prices, patient)
+            }
+        };
+    }
+    // default: cheapest available source (TP, vendor, or sub-craft estimate)
+    let mut best: Option<Money> = None;
+    let mut consider = |candidate: Option<Money>| {
+        best = match (best, candidate) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (None, c) => c,
+            (b, None) => b,
+        };
+    };
+    consider(tp_unit_price(item_id, prices, patient).map(|u| u * count));
+    consider(
+        analysis
+            .items_map
+            .get(&item_id)
+            .and_then(vendor_unit_price)
+            .map(|u| u * count),
+    );
+    consider(estimate_craft_cost(
+        item_id, count, overrides, analysis, prices, patient,
+    ));
+    best
+}
+
+/// Estimated cost of crafting `count` units via recipe (None when the item
+/// has no recipe or a subtree is unobtainable).
+fn estimate_craft_cost(
+    item_id: u32,
+    count: u32,
+    overrides: &HashMap<u32, crafting::Source>,
+    analysis: &Analysis,
+    prices: &HashMap<u32, api::Price>,
+    patient: bool,
+) -> Option<Money> {
+    let recipe = analysis.recipes_map.get(&item_id)?;
+    let crafts = count.div_ceil(recipe.output_item_count);
+    let mut total = Money::default();
+    for ingredient in &recipe.ingredients {
+        total += estimate_override_cost(
+            ingredient.item_id,
+            ingredient.count * crafts,
+            overrides,
+            analysis,
+            prices,
+            patient,
+        )?;
+    }
+    Some(total)
 }
 
 /// Bounds for the "Background worker threads" setting.
@@ -373,6 +512,7 @@ impl App {
             detail_loading: false,
             detail: None,
             detail_unknown_names: vec![],
+            detail_source_overrides: HashMap::new(),
             show_settings: false,
             show_filters: false,
             filter_draft: FilterValues::default(),
@@ -471,6 +611,7 @@ impl App {
         self.detail_loading = true;
         self.detail = None;
         self.detail_unknown_names.clear();
+        self.detail_source_overrides.clear();
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -1897,6 +2038,153 @@ impl App {
         }
     }
 
+    /// One node of the crafting tree: crafted intermediates render as
+    /// collapsible headers with their recipe children, everything else as a
+    /// cost row. Every row carries a source selector (only available options
+    /// are offered) feeding the override estimate. `needed` is the total
+    /// units required at this node; `path` keeps header ids unique when an
+    /// ingredient appears under several parents.
+    #[allow(clippy::too_many_arguments)]
+    fn show_tree_node(
+        ui: &mut egui::Ui,
+        analysis: &Analysis,
+        prices: Option<&HashMap<u32, api::Price>>,
+        purchased: &HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
+        crafted: &HashMap<u32, u32>,
+        overrides: &mut HashMap<u32, crafting::Source>,
+        item_id: u32,
+        needed: u32,
+        path: String,
+        depth: u32,
+    ) {
+        let patient = crate::config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
+        let name = analysis
+            .items_map
+            .get(&item_id)
+            .map_or_else(|| "???".to_string(), |i| i.to_string());
+        let name_color = analysis
+            .items_map
+            .get(&item_id)
+            .map(|i| rarity_color(i.rarity()))
+            .unwrap_or(egui::Color32::PLACEHOLDER);
+        let recipe = analysis.recipes_map.get(&item_id);
+
+        // per-source availability for the selector
+        let can_craft = recipe.is_some();
+        let can_vendor = analysis
+            .items_map
+            .get(&item_id)
+            .is_some_and(|item| item.vendor_cost().is_some() || item.token_value().is_some());
+        let can_buy = prices
+            .and_then(|prices| prices.get(&item_id))
+            .is_some_and(|price| {
+                if patient {
+                    price.buys.quantity > 0
+                } else {
+                    price.sells.quantity > 0
+                }
+            });
+
+        // original exact rows for this id, dominant source first
+        let mut original: Vec<(crafting::Source, &crafting::PurchasedIngredient)> = purchased
+            .iter()
+            .filter(|((id, _), _)| *id == item_id)
+            .map(|((_, source), ingredient)| (*source, ingredient))
+            .collect();
+        original.sort_by_key(|(source, ingredient)| (std::cmp::Reverse(ingredient.count), *source));
+        let bought_count: u32 = original.iter().map(|(_, ing)| ing.count).sum();
+        let bought_total = original
+            .iter()
+            .map(|(_, ing)| ing.total_cost)
+            .fold(Money::default(), |a, b| a + b);
+
+        // selector state: pinned override, else the dominant original source,
+        // else the first available option
+        let display_default = original
+            .first()
+            .map(|(source, _)| *source)
+            .or(if can_craft {
+                Some(crafting::Source::Crafting)
+            } else if can_buy {
+                Some(crafting::Source::TradingPost)
+            } else if can_vendor {
+                Some(crafting::Source::Vendor)
+            } else {
+                None
+            });
+        let before = overrides.get(&item_id).copied().or(display_default);
+
+        let is_branch =
+            depth < 20 && recipe.is_some() && (depth == 0 || crafted.contains_key(&item_id));
+        if !is_branch {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("×{needed} {name}")).color(name_color));
+                if bought_count > 0 {
+                    ui.label(format!("{bought_count} for {bought_total}"));
+                } else if let Some(made) = crafted.get(&item_id) {
+                    ui.label(format!("made {made}"));
+                } else {
+                    ui.label("unobtainable");
+                }
+                if prices.is_none() {
+                    ui.small("snapshot unavailable");
+                } else if let Some(source) =
+                    source_selector(ui, item_id, can_buy, can_craft, can_vendor, before)
+                {
+                    overrides.insert(item_id, source);
+                }
+            });
+            return;
+        }
+
+        let recipe = recipe.expect("branch checked above");
+        let header = match crafted.get(&item_id) {
+            Some(made) => format!("{name} (need {needed}, made {made})"),
+            None => format!("{name} (need {needed})"),
+        };
+        egui::CollapsingHeader::new(egui::RichText::new(header).color(name_color))
+            .id_source(path.clone())
+            .default_open(depth < 2)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.small("Source for this subtree:");
+                    if prices.is_none() {
+                        ui.small("snapshot unavailable");
+                    } else if let Some(source) =
+                        source_selector(ui, item_id, can_buy, can_craft, can_vendor, before)
+                    {
+                        overrides.insert(item_id, source);
+                    }
+                });
+                let crafts = needed.div_ceil(recipe.output_item_count);
+                let mut children: Vec<(u32, u32)> = recipe
+                    .ingredients
+                    .iter()
+                    .map(|ing| (ing.item_id, ing.count))
+                    .collect();
+                children.sort_by_key(|(id, _)| {
+                    analysis
+                        .items_map
+                        .get(id)
+                        .map_or_else(String::new, |i| i.to_string())
+                });
+                for (child_id, per_craft) in children {
+                    Self::show_tree_node(
+                        ui,
+                        analysis,
+                        prices,
+                        purchased,
+                        crafted,
+                        overrides,
+                        child_id,
+                        per_craft * crafts,
+                        format!("{path}/{child_id}"),
+                        depth + 1,
+                    );
+                }
+            });
+    }
+
     fn show_item_detail(&mut self, ui: &mut egui::Ui, item_id: u32) {
         let analysis: Arc<Analysis> = match &self.analysis {
             Some(a) => Arc::clone(a),
@@ -2132,32 +2420,74 @@ impl App {
                 });
         }
 
-        ui.strong("Shopping list");
+        // Work on a local copy: the detail data above borrows self.detail,
+        // which rules out &mut self inside the UI closures below. Written
+        // back once at the end (single-threaded UI: nothing races it).
+        let mut overrides = self.detail_source_overrides.clone();
+        ui.strong("Crafting tree (exact numbers)");
         egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("shopping_grid")
-                .striped(true)
-                .num_columns(5)
-                .show(ui, |ui| {
-                    ui.strong("Source");
-                    ui.strong("Ingredient");
-                    ui.strong("Count");
-                    ui.strong("Unit cost");
-                    ui.strong("Total cost");
-                    ui.end_row();
-                    for ((ingredient_id, source), ingredient) in purchased_ingredients {
-                        let name = analysis
-                            .items_map
-                            .get(ingredient_id)
-                            .map_or_else(|| "???".to_string(), |i| i.to_string());
-                        ui.label(format!("{:?}", source));
-                        ui.label(name);
-                        ui.label(format!("{}", ingredient.count));
-                        ui.label(format!("{}", ingredient.min_price));
-                        ui.label(format!("{}", ingredient.total_cost));
-                        ui.end_row();
-                    }
-                });
+            Self::show_tree_node(
+                ui,
+                analysis.as_ref(),
+                self.market_snapshot.as_ref().map(|s| &s.prices),
+                purchased_ingredients,
+                &profitable_item.crafted_items.crafted,
+                &mut overrides,
+                item_id,
+                profitable_item.count,
+                String::from("root"),
+                0,
+            );
         });
+
+        // override estimate: recomputes the whole tree with top-of-book
+        // prices (see estimate_override_cost); the exact panel above stays
+        // the book-aware truth
+        if !overrides.is_empty() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.strong("Override estimate");
+                if ui.button("Reset overrides").clicked() {
+                    overrides.clear();
+                }
+            });
+            match self.market_snapshot.as_ref().map(|s| &s.prices) {
+                None => {
+                    ui.small("Overrides need a market snapshot: run an analysis first.");
+                }
+                Some(prices) => {
+                    let patient =
+                        crate::config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
+                    match estimate_override_cost(
+                        item_id,
+                        profitable_item.count,
+                        &overrides,
+                        &analysis,
+                        prices,
+                        patient,
+                    ) {
+                        Some(cost) => {
+                            let revenue = profitable_item.profit + profitable_item.crafting_cost;
+                            let profit = revenue - cost;
+                            ui.label(format!(
+                                "Cost {}, profit {} ({} / item)",
+                                cost,
+                                profit,
+                                profit / profitable_item.count,
+                            ));
+                            ui.small("Estimate: ignores order-book depth.");
+                        }
+                        None => {
+                            ui.colored_label(
+                                egui::Color32::RED,
+                                "Cannot price this combination (something is unobtainable).",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.detail_source_overrides = overrides;
 
         if refresh_requested {
             self.request_item_detail(item_id, true);
