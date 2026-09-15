@@ -123,7 +123,11 @@ New/changed modules:
   - List: sortable by profit, per-row icon (lazy download via `icons.rs`, decoded to egui textures, placeholder on failure), ★ favorite toggle (pinned to top), favorites-only filter, discipline multi-filter checkboxes.
   - Detail window on row click: icon, name, favorite toggle, links (GW2 wiki / gw2efficiency / gw2bltc), profit summary (count, sell-at range, money required, breakeven), unknown-recipe warning, shopping-list grid (source: Crafting/TradingPost/Vendor, ingredient, count, min price, total cost).
   - Threading: analysis and item analysis run on background threads with their own tokio runtimes, communicating via `mpsc` events (`Progress`, `AnalysisDone`, `ItemDone`, `IconLoaded`, …); UI repaints while work is pending.
-- Cargo.toml additions: `eframe 0.27`, `image 0.25` (png only), `rfd 0.12`.
+- `src/velocity.rs` — sell-velocity estimates from the community datawars2.ie TP history API:
+  - `fetch_velocity(item_id) -> Velocity` with per-window units/day: 6h/12h/24h from the hourly endpoint, 7d/2w/1m/3m from the daily endpoint (`start=YYYY-MM-DD`, ISO — unix timestamps do NOT work, verified empirically; multi-ID is not supported either).
+  - Only `sell_sold` counts (actual instant-buy sales); `sell_delisted` cancellations are ignored.
+  - Coverage check: a window needs ≥80% of its expected buckets, else it reports `None` (shown as "–" in the GUI).
+- Cargo.toml additions: `eframe 0.27`, `egui_extras 0.27` (TableBuilder for the sortable, resizable, full-width table), `image 0.25` (png only), `rfd 0.12`.
 
 Remaining known gaps (see `todo.md`): count/timegated/ascended options currently only settable at startup (global `CONFIG`); API key setting UI; per-item live price refresh; TP order book display; wallet auto-conversion.
 

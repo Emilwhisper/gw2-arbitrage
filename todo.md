@@ -51,4 +51,6 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [ ] Auto-populate currency conversion values from `/v2/account/wallet` (API key).
 - [x] Per-item "refresh prices now" in the detail window (bypasses the listings cache via `calc_item_profit(refresh: true)`).
 - [ ] Material-bank awareness (`/v2/account/materials`) to compute profit using owned materials.
+- [x] Sell-velocity columns (6h / 12h / 24h / 7d / 2w / 1m / 3m, units/day) fetched from `https://api.datawars2.ie/gw2/v2/history/…` (see new `src/velocity.rs`), with per-window coverage checks (≥80% of expected buckets, else "–"), 4 background worker threads, and sortable columns.
+- [x] Table rework: clickable column headers sort the table (click again to flip direction), full-window width via `egui_extras::TableBuilder` (resizable columns, name column takes remaining space).
 - [ ] Background auto-refresh of the list on a timer.
