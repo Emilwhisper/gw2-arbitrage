@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod api;
 pub mod config;
 pub mod crafting;
+pub mod favorites;
 pub mod gw2efficiency;
 pub mod gui;
 pub mod icons;

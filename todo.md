@@ -9,7 +9,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Add `--cli` flag / argument detection so the single binary can run in either console or GUI mode. (No args or `--cli` absent logic: no args → GUI; `--cli` or any arguments → CLI.)
 - [x] Icon caching: new `icons.rs` library module — `get_icon(item_id, url, notify) -> Option<PathBuf>` (check disk → download PNG → save → return path). Uses `CONFIG.icons_dir` (`<cache-dir>\icons`).
   - [ ] Store raw PNGs in a permanent `icons/` subfolder of the cache dir (`...\gw2-arbitrage\icons\<item_id>.png`); icons are immutable, no expiry, and `flush_cache` only deletes `cache_*` files so they survive `--reset-cache`.
-  - [ ] Lazy/on-demand download for displayed rows + detail window (avoids 60k+ downloads on first run).
+  - [x] GUI renders item icons from the `icons.rs` disk cache: lazy per-row download on a background thread, decoded to egui textures, placeholder on failure.
   - [ ] In-memory LRU/HashMap of decoded images so egui doesn't re-read files per frame.
   - [ ] Optional "prefetch all icons" button using the existing parallel `stream::buffered` pattern.
   - [ ] CLI mode ignores icons entirely (no impact on console output).
@@ -32,9 +32,9 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [ ] "You don't know this recipe" warning when the recipe id is missing from account unlocks (requires API key).
 
 ## Phase 3 — Favorites
-- [ ] Star/checkbox per row in the list.
-- [ ] Persist favorites as item ids in a JSON file (e.g. `favorites.json` next to the cache dir).
-- [ ] Favorites pinned to the top of the list; sorting applies within favorites first, then the rest.
+- [x] Star/checkbox per row in the list.
+- [x] Persist favorites as item ids in a JSON file (`favorites.json` in the cache dir) via new `favorites.rs` module.
+- [x] Favorites pinned to the top of the list; sorting applies within favorites first, then the rest.
 - [ ] "Show favorites only" filter toggle.
 - [ ] Favorite toggle also available inside the detail window.
 

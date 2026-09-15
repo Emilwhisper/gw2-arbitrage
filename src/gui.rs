@@ -4,16 +4,20 @@
 //! displays the profitable items in a list. Clicking an item opens a detail
 //! window with its shopping list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
 use eframe::egui;
+use egui::TextureHandle;
 
 use crate::analysis::{self, Analysis};
 use crate::api;
 use crate::crafting;
+use crate::favorites;
+use crate::icons;
 use crate::item::Item;
 use crate::money::Money;
 use crate::profit::ProfitableItem;
@@ -31,6 +35,7 @@ enum Event {
         HashMap<u32, api::Price>,
     ),
     ItemError(u32, String),
+    IconLoaded(u32, Option<PathBuf>),
 }
 
 pub fn run() -> Result<(), eframe::Error> {
@@ -55,6 +60,10 @@ struct App {
     running: bool,
     status: String,
     sort_by_profit_desc: bool,
+    favorites: HashSet<u32>,
+    favorites_dirty: bool,
+    icon_textures: HashMap<u32, Option<TextureHandle>>,
+    pending_icons: HashSet<u32>,
     detail_item_id: Option<u32>,
     detail_open: bool,
     detail_loading: bool,
@@ -80,6 +89,10 @@ impl App {
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
                 .to_string(),
             sort_by_profit_desc: true,
+            favorites: favorites::load(),
+            favorites_dirty: false,
+            icon_textures: HashMap::new(),
+            pending_icons: HashSet::new(),
             detail_item_id: None,
             detail_open: false,
             detail_loading: false,
@@ -147,7 +160,53 @@ impl App {
         });
     }
 
-    fn drain_events(&mut self) {
+    fn request_icon(&mut self, ctx: &egui::Context, item_id: u32, icon_url: Option<String>) {
+        if self.pending_icons.contains(&item_id) || self.icon_textures.contains_key(&item_id) {
+            return;
+        }
+        self.pending_icons.insert(item_id);
+        let tx = self.events_sender.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            let path = runtime.block_on(icons::get_icon(item_id, icon_url.as_deref(), None));
+            let _ = tx.send(Event::IconLoaded(item_id, path));
+            ctx.request_repaint();
+        });
+    }
+
+    fn load_icon_texture(&mut self, ctx: &egui::Context, item_id: u32, path: Option<PathBuf>) {
+        let texture = path.and_then(|path| {
+            let bytes = std::fs::read(&path).ok()?;
+            let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+            let size = [img.width() as usize, img.height() as usize];
+            let texture = ctx.load_texture(
+                format!("icon-{}", item_id),
+                egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+            Some(texture)
+        });
+        self.icon_textures.insert(item_id, texture);
+    }
+
+    fn toggle_favorite(&mut self, item_id: u32) {
+        if !self.favorites.remove(&item_id) {
+            self.favorites.insert(item_id);
+        }
+        self.favorites_dirty = true;
+    }
+
+    fn flush_favorites(&mut self) {
+        if self.favorites_dirty {
+            if let Err(e) = favorites::save(&self.favorites) {
+                self.status = format!("Failed to save favorites: {}", e);
+            }
+            self.favorites_dirty = false;
+        }
+    }
+
+    fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Progress(msg) => self.status = msg,
@@ -174,6 +233,9 @@ impl App {
                         self.status = format!("Item analysis failed: {}", e);
                     }
                 }
+                Event::IconLoaded(item_id, path) => {
+                    self.load_icon_texture(ctx, item_id, path);
+                }
             }
         }
     }
@@ -182,10 +244,11 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        self.drain_events(ctx);
+        self.flush_favorites();
 
         // keep repainting while background work is running
-        if self.running || self.detail_loading {
+        if self.running || self.detail_loading || !self.pending_icons.is_empty() {
             ctx.request_repaint();
         }
 
@@ -237,16 +300,39 @@ impl App {
         });
         ui.separator();
 
+        // Precompute everything the UI closure needs so it doesn't borrow `self`.
+        let mut items: Vec<&ProfitableItem> = self.profitable_items.iter().collect();
+        if self.sort_by_profit_desc {
+            items.sort_by_key(|i| {
+                (!self.favorites.contains(&i.id), -i.profit.to_copper_value())
+            });
+        } else {
+            items.sort_by_key(|i| !self.favorites.contains(&i.id));
+        }
+        let favorites = self.favorites.clone();
+        let detail_item_id = self.detail_item_id;
+        // texture ids are cheap to copy; None marks "failed to load"
+        let icon_ids: HashMap<u32, Option<egui::TextureId>> = self
+            .icon_textures
+            .iter()
+            .map(|(id, tex)| (*id, tex.as_ref().map(|t| t.id())))
+            .collect();
+        let icon_urls: HashMap<u32, Option<String>> = analysis
+            .items_map
+            .iter()
+            .map(|(id, item)| (*id, item.icon.clone()))
+            .collect();
+
         let mut clicked: Option<u32> = None;
+        let mut favorite_toggled: Option<u32> = None;
+        let mut icons_requested: Vec<u32> = vec![];
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut items: Vec<&ProfitableItem> = self.profitable_items.iter().collect();
-            if self.sort_by_profit_desc {
-                items.sort_by_key(|i| -i.profit.to_copper_value());
-            }
             egui::Grid::new("item_grid")
                 .striped(true)
-                .num_columns(6)
+                .num_columns(8)
                 .show(ui, |ui| {
+                    ui.strong("Icon");
+                    ui.strong("★");
                     ui.strong("Name");
                     ui.strong("Disciplines");
                     ui.strong("Item ID");
@@ -257,6 +343,30 @@ impl App {
                     for item in &items {
                         if item.count == 0 {
                             continue;
+                        }
+                        // icon (lazy download + cache)
+                        match icon_ids.get(&item.id) {
+                            Some(Some(tex_id)) => {
+                                ui.image((*tex_id, egui::vec2(24.0, 24.0)));
+                            }
+                            Some(None) => {
+                                ui.label("");
+                            }
+                            None => {
+                                ui.label("");
+                                icons_requested.push(item.id);
+                            }
+                        }
+                        // favorite star
+                        let is_favorite = favorites.contains(&item.id);
+                        if ui
+                            .selectable_label(
+                                is_favorite,
+                                if is_favorite { "★" } else { "☆" },
+                            )
+                            .clicked()
+                        {
+                            favorite_toggled = Some(item.id);
                         }
                         let name = analysis
                             .items_map
@@ -275,7 +385,7 @@ impl App {
                             .unwrap_or_default();
                         if ui
                             .selectable_label(
-                                self.detail_item_id == Some(item.id),
+                                detail_item_id == Some(item.id),
                                 format!("{:<50}", name),
                             )
                             .clicked()
@@ -294,6 +404,13 @@ impl App {
 
         if let Some(item_id) = clicked {
             self.request_item_detail(item_id);
+        }
+        if let Some(item_id) = favorite_toggled {
+            self.toggle_favorite(item_id);
+        }
+        for item_id in icons_requested {
+            let icon_url = icon_urls.get(&item_id).cloned().flatten();
+            self.request_icon(ui.ctx(), item_id, icon_url);
         }
     }
 
