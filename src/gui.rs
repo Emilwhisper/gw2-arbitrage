@@ -205,6 +205,9 @@ struct App {
     detail_open: bool,
     detail_loading: bool,
     detail: Option<DetailData>,
+    /// human-readable names for the detail's unknown recipes, resolved once
+    /// per item open (raw recipe ids are useless in the UI)
+    detail_unknown_names: Vec<String>,
     show_settings: bool,
     show_filters: bool,
     /// Draft values edited in the Filters window (persisted on Apply).
@@ -365,6 +368,7 @@ impl App {
             detail_open: false,
             detail_loading: false,
             detail: None,
+            detail_unknown_names: vec![],
             show_settings: false,
             show_filters: false,
             filter_draft: FilterValues::default(),
@@ -462,6 +466,7 @@ impl App {
         self.detail_open = true;
         self.detail_loading = true;
         self.detail = None;
+        self.detail_unknown_names.clear();
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -992,6 +997,30 @@ impl App {
                     order_book,
                 ) => {
                     if self.detail_item_id == Some(item_id) {
+                        // resolve recipe ids to unlock-item names once (the
+                        // detail view renders every frame; don't scan 74k
+                        // items per frame for this)
+                        let mut names: Vec<String> = vec![];
+                        if let Some(analysis) = &self.analysis {
+                            let mut seen = std::collections::HashSet::new();
+                            for recipe_id in &unknown {
+                                if !seen.insert(recipe_id) {
+                                    continue;
+                                }
+                                let label = analysis
+                                    .items_map
+                                    .values()
+                                    .find_map(|item| {
+                                        item.recipe_unlocks().and_then(|unlocks| {
+                                            unlocks.contains(recipe_id).then(|| item.to_string())
+                                        })
+                                    })
+                                    .unwrap_or_else(|| format!("recipe #{}", recipe_id));
+                                names.push(label);
+                            }
+                        }
+                        names.sort();
+                        self.detail_unknown_names = names;
                         self.detail =
                             Some((profitable_item, purchased, unknown, prices, order_book));
                         self.detail_loading = false;
@@ -1004,6 +1033,9 @@ impl App {
                     }
                 }
                 Event::IconLoaded(item_id, path) => {
+                    // done pending either way: without this the repaint flag
+                    // below stays on forever
+                    self.pending_icons.remove(&item_id);
                     self.load_icon_texture(ctx, item_id, path);
                 }
                 Event::IconCached => {
@@ -1974,7 +2006,11 @@ impl App {
                 egui::Color32::RED,
                 "WARNING: you may not know these recipes:",
             );
-            ui.label(format!("{:?}", required_unknown_recipes));
+            if self.detail_unknown_names.is_empty() {
+                ui.label(format!("{:?}", required_unknown_recipes));
+            } else {
+                ui.label(self.detail_unknown_names.join(", "));
+            }
         }
 
         ui.separator();
@@ -1983,9 +2019,8 @@ impl App {
             if ui.button("Refresh prices").clicked() {
                 refresh_requested = true;
             }
-            if self.detail_loading {
-                ui.spinner();
-            }
+            // NOTE: no spinner here: detail_loading is always false past the
+            // early return above; loading feedback is the spinner up there
         });
 
         // Trading post order book (best asks/bids) for the crafted item

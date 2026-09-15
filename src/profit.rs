@@ -410,7 +410,13 @@ impl ProfitableItem {
     }
 
     pub fn profit_per_crafting_step(&self) -> Money {
-        self.profit / self.crafting_steps
+        // guard against zero steps (unreachable today, but cheap insurance
+        // for recalculation paths with forced sources)
+        if self.crafting_steps == 0 {
+            Money::zero()
+        } else {
+            self.profit / self.crafting_steps
+        }
     }
 
     pub fn profit_on_cost(&self) -> f64 {
