@@ -172,3 +172,22 @@ pub async fn run_item_analysis(
     )
     .await
 }
+
+/// Delete the cached items/recipes data files so the next run re-downloads
+/// them from the GW2 API. Icons and favorites are preserved.
+/// Returns the paths that were removed.
+pub fn reset_data_files() -> Vec<std::path::PathBuf> {
+    let mut removed = vec![];
+    for file in [
+        &CONFIG.items_file,
+        &CONFIG.api_recipes_file,
+        &CONFIG.custom_recipes_file,
+    ] {
+        if file.exists() {
+            let _ = std::fs::remove_file(file);
+            removed.push(file.clone());
+        }
+    }
+    removed
+}
+

@@ -21,8 +21,8 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Show the profitable-items list in a sortable table: name, disciplines, item id, total profit, profit/item, profit/step.
 - [x] Clicking a row opens a detail window (shopping list, sell-at/breakeven, unknown-recipe warning).
 - [ ] Filters matching CLI options: disciplines multi-select, `--count` limit, timegated/ascended include toggles.
-- [ ] CSV export button (`--output-csv` equivalent).
-- [ ] "Refresh cache / reset cache" button (`--reset-cache` equivalent).
+- [x] CSV export button (`--output-csv` equivalent) with a native save-file dialog, same columns as CLI output.
+- [x] "Refresh cache / reset cache" button (`--reset-cache` equivalent) via `analysis::reset_data_files()` (deletes items/recipes data, keeps icons + favorites).
 
 ## Phase 2 — Item detail window
 - [ ] Clicking a row opens a detail window: icon (rarity-colored name), type, level, restrictions.
@@ -36,7 +36,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Persist favorites as item ids in a JSON file (`favorites.json` in the cache dir) via new `favorites.rs` module.
 - [x] Favorites pinned to the top of the list; sorting applies within favorites first, then the rest.
 - [ ] "Show favorites only" filter toggle.
-- [ ] Favorite toggle also available inside the detail window.
+- [x] Favorite toggle also available inside the detail window.
 
 ## Phase 4 — Windows polish
 - [ ] `cargo build --release` on Windows; produce a portable zip (single `.exe`) and/or an installer (e.g. Inno Setup / NSIS).

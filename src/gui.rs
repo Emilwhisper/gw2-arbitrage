@@ -211,6 +211,95 @@ impl App {
         }
     }
 
+    fn export_csv(&mut self) {
+        let analysis = match self.analysis.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let path = match rfd::FileDialog::new()
+            .set_title("Export profitable items to CSV")
+            .set_file_name("gw2-arbitrage.csv")
+            .add_filter("CSV files", &["csv"])
+            .save_file()
+        {
+            Some(p) => p,
+            None => return,
+        };
+
+        let mut items: Vec<&ProfitableItem> = self.profitable_items.iter().collect();
+        items.sort_by_key(|i| -i.profit.to_copper_value());
+
+        let mut rows: Vec<Vec<String>> = vec![vec![
+            "Name",
+            "Disciplines",
+            "Item ID",
+            "Unknown recipes",
+            "Total profit",
+            "No. required",
+            "Profit / item",
+            "Crafting steps",
+            "Profit / step",
+            "Profit on cost",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()];
+
+        for item in items {
+            if item.count == 0 {
+                continue;
+            }
+            let name = analysis
+                .items_map
+                .get(&item.id)
+                .map_or_else(|| "???".to_string(), |i| i.to_string());
+            let disciplines = analysis
+                .recipes_map
+                .get(&item.id)
+                .map(|r: &Recipe| {
+                    r.disciplines
+                        .iter()
+                        .map(|d| d.get_abbrev())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_default();
+            let unknown = item
+                .crafted_items
+                .unknown_recipes(&analysis.recipes_map, &analysis.known_recipes)
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+                .join(",");
+            rows.push(vec![
+                name,
+                disciplines,
+                item.id.to_string(),
+                unknown,
+                item.profit.to_string(),
+                item.count.to_string(),
+                item.profit_per_item().to_copper_value().to_string(),
+                item.crafting_steps.to_string(),
+                item.profit_per_crafting_step().to_copper_value().to_string(),
+                ((item.profit_on_cost() * 100_f64).round() as i64).to_string(),
+            ]);
+        }
+
+        self.status = format!("Exporting CSV to {}", path.display());
+        thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let mut writer = csv::Writer::from_path(&path).map_err(|e| e.to_string())?;
+                for row in &rows {
+                    writer.write_record(row).map_err(|e| e.to_string())?;
+                }
+                writer.flush().map_err(|e| e.to_string())
+            })();
+            if let Err(e) = result {
+                eprintln!("CSV export failed: {}", e);
+            }
+        });
+    }
+
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -263,7 +352,19 @@ impl eframe::App for App {
                     if ui.button("Run analysis").clicked() {
                         self.spawn_analysis();
                     }
+                    if ui.button("Reset cache & re-run").clicked() {
+                        analysis::reset_data_files();
+                        self.spawn_analysis();
+                    }
                 });
+                ui.add_enabled_ui(
+                    !self.profitable_items.is_empty() && self.analysis.is_some(),
+                    |ui| {
+                        if ui.button("Export CSV...").clicked() {
+                            self.export_csv();
+                        }
+                    },
+                );
                 if self.running {
                     ui.spinner();
                 }
