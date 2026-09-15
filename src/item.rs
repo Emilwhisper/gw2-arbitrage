@@ -268,6 +268,11 @@ impl Item {
             // LW1
             // 50025 Blade Shard
             50025 => Some(Money::from_copper(0)),
+            // 12339 Lime: unpack-only (Limes in Bulk costs 77 karma / 25).
+            // Ungated like the other zero-cost entries so it is obtainable
+            // without --karma; karma itself counts as free (see
+            // Money::copper_value), so this adds 0 to crafting costs.
+            12339 => Some(Money::new(0, 77, 0, 0, 0) / 25),
             // LW3
             // 79280 Blood Ruby
             // 79469 Petrified Wood

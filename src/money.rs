@@ -70,8 +70,10 @@ impl Money {
     }
 
     fn copper_value(&self) -> Rational32 {
+        // NOTE: karma is deliberately valued at zero (treated as a free
+        // currency): karma costs still show up in displays and shopping lists,
+        // but they never add to the copper cost used for profit math.
         self.copper
-            + self.karma * CONFIG.karma.unwrap_or(Rational32::zero())
             + self.um * CONFIG.um.unwrap_or(Rational32::zero())
             + self.vm * CONFIG.vm.unwrap_or(Rational32::zero())
             + self.rn * CONFIG.rn.unwrap_or(Rational32::zero())
