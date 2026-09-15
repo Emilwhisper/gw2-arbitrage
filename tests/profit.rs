@@ -638,6 +638,57 @@ fn calculate_crafting_profit_with_subitem_leftovers() {
     );
 }
 
+#[test]
+fn patient_book_methods_test() {
+    use gw2_arbitrage::money::Money;
+    use gw2_arbitrage::profit::{ItemListings, Listing};
+
+    // struct order (as produced by fetch_item_listings): buys ascending with
+    // the best bid last, sells descending with the cheapest ask last
+    let mut book = ItemListings {
+        id: 1,
+        buys: vec![
+            Listing {
+                unit_price: 90,
+                quantity: 1,
+            },
+            Listing {
+                unit_price: 100,
+                quantity: 2,
+            },
+        ],
+        sells: vec![
+            Listing {
+                unit_price: 110,
+                quantity: 1,
+            },
+            Listing {
+                unit_price: 105,
+                quantity: 2,
+            },
+        ],
+        pending_buy_quantity: 0,
+        pending_sell_quantity: 0,
+    };
+
+    // patient buying walks down from the best bid
+    assert_eq!(book.highest_buy_offer(2), Some(200));
+    // pending reservations are skipped by estimates...
+    book.pending_sell_quantity = 1;
+    assert_eq!(book.highest_buy_offer(2), Some(190));
+    book.pending_sell_quantity = 0;
+    // ...but real purchases consume the reserved quantities first
+    assert_eq!(book.buy_at_bid(3), Some((290, 100, 90)));
+
+    // patient selling walks up from the cheapest ask, fees applied per unit
+    let (revenue, max_ask) = book.sell_at_ask(2).unwrap();
+    assert_eq!(max_ask, 105);
+    assert_eq!(
+        revenue,
+        Money::from_copper(105).trading_post_sale_revenue() * 2
+    );
+}
+
 fn tp_listings_map(
     from: Vec<(u32, Vec<(u32, u32)>, Vec<(u32, u32)>)>,
 ) -> HashMap<u32, ItemListings> {

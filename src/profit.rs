@@ -26,6 +26,7 @@ pub fn find_profitable_items(
     let threshold = Money::from_copper(
         config::PROFIT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) as i32,
     );
+    let patient = config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
     for (item_id, recipe) in recipes_map {
         if let Some(item) = items_map.get(item_id) {
             // we cannot sell restricted items
@@ -67,8 +68,14 @@ pub fn find_profitable_items(
             &tp_prices_map,
             &CONFIG.crafting,
         ) {
-            let effective_buy_price =
-                Money::from_copper(tp_prices.buys.unit_price as i32).trading_post_sale_revenue();
+            // effective sale revenue: top bid when instant, cheapest ask when
+            // patient (both minus trading-post fees)
+            let effective_buy_price = Money::from_copper(if patient {
+                tp_prices.sells.unit_price as i32
+            } else {
+                tp_prices.buys.unit_price as i32
+            })
+            .trading_post_sale_revenue();
             if effective_buy_price > crafting_cost + threshold {
                 profitable_item_ids.push(*item_id);
                 if let Some(recipe) = recipes_map.get(&item_id) {
@@ -247,6 +254,10 @@ pub fn calculate_crafting_profit(
     let threshold = Money::from_copper(
         config::PROFIT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) as i32,
     );
+    // live price mode shared with `find_profitable_items` (GUI Instant /
+    // Patient toggle); initialized from `--patient`, so CLI behavior is
+    // unchanged (instant unless flagged)
+    let patient = config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
 
     let mut listing_profit = Money::zero();
     let mut total_crafting_cost = Money::zero();
@@ -254,9 +265,17 @@ pub fn calculate_crafting_profit(
     let mut crafted_items = crafting::CraftedItems::default();
 
     let mut min_sell = 0;
+    // best price the product can fetch right now: top bid when instant,
+    // cheapest ask when patient (both before fees)
     let max_sell = tp_listings_map.get(&item_id).map_or_else(
         || opt.threshold.unwrap_or(0),
-        |listings| listings.buys.last().map_or(0, |l| l.unit_price),
+        |listings| {
+            if patient {
+                listings.sells.last().map_or(0, |l| l.unit_price)
+            } else {
+                listings.buys.last().map_or(0, |l| l.unit_price)
+            }
+        },
     );
     let mut breakeven = Money::zero();
 
@@ -301,7 +320,7 @@ pub fn calculate_crafting_profit(
         } else if let Some((buy_price, min_buy)) = tp_listings_map
             .get_mut(&item_id)
             .unwrap_or_else(|| panic!("Missing listings for item id: {}", item_id))
-            .sell(output_item_count)
+            .sell_with_mode(output_item_count, patient)
         {
             (buy_price, min_buy)
         } else {
@@ -340,13 +359,18 @@ pub fn calculate_crafting_profit(
                         purchase_id, item_id
                     )
                 });
-                listing.pending_buy_quantity -= *count;
-                let (cost, min_sell, max_sell) = listing.buy(*count).unwrap_or_else(|| {
-                    panic!(
-                        "Expected to be able to buy {} of ingredient {} for item id {}",
-                        count, purchase_id, item_id
-                    )
-                });
+                if patient {
+                    listing.pending_sell_quantity -= *count;
+                } else {
+                    listing.pending_buy_quantity -= *count;
+                }
+                let (cost, min_sell, max_sell) =
+                    listing.buy_with_mode(*count, patient).unwrap_or_else(|| {
+                        panic!(
+                            "Expected to be able to buy {} of ingredient {} for item id {}",
+                            count, purchase_id, item_id
+                        )
+                    });
                 (cost, min_sell, max_sell)
             } else {
                 (0, 0, 0)
@@ -362,16 +386,26 @@ pub fn calculate_crafting_profit(
                         total_cost: Money::default(),
                     });
                 ingredient.count += count;
-                if ingredient.min_price.is_zero() {
-                    ingredient.min_price = Money::from_copper(min_sell as i32);
+                // track the true range over all batches (asks ascend as the
+                // book depletes, but don't rely on that: compare properly
+                // instead of the old is-zero sentinel, which broke on
+                // genuine zero prices)
+                let batch_min = Money::from_copper(min_sell as i32);
+                let batch_max = Money::from_copper(max_sell as i32);
+                if ingredient.count == *count {
+                    // first batch recorded for this entry
+                    ingredient.min_price = batch_min;
+                    ingredient.max_price = batch_max;
+                } else {
+                    ingredient.min_price = ingredient.min_price.min(batch_min);
+                    ingredient.max_price = ingredient.max_price.max(batch_max);
                 }
-                ingredient.max_price = Money::from_copper(max_sell as i32);
                 ingredient.total_cost += Money::from_copper(cost as i32);
             }
         }
-        debug_assert!(tp_listings_map
-            .iter()
-            .all(|(_, listing)| listing.pending_buy_quantity == 0));
+        debug_assert!(tp_listings_map.iter().all(|(_, listing)| {
+            listing.pending_buy_quantity == 0 && listing.pending_sell_quantity == 0
+        }));
     }
 
     if crafting_count > 0 && !listing_profit.is_zero() {
@@ -430,6 +464,7 @@ pub struct ItemListings {
     pub buys: Vec<Listing>,
     pub sells: Vec<Listing>,
     pub pending_buy_quantity: u32,
+    pub pending_sell_quantity: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -492,6 +527,81 @@ impl ItemListings {
         Some((revenue, min_buy))
     }
 
+    /// Patient counterpart of `buy`: place buy orders, filling from the best
+    /// bids down. Returns (cost, highest bid paid, lowest bid paid).
+    pub fn buy_at_bid(&mut self, mut count: u32) -> Option<(u32, u32, u32)> {
+        let mut cost = 0;
+        let mut min_buy = 0;
+        let mut max_buy = 0;
+
+        while count > 0 {
+            // buys are sorted in ascending price
+            let remove = if let Some(listing) = self.buys.last_mut() {
+                listing.quantity -= 1;
+                count -= 1;
+                if min_buy == 0 {
+                    min_buy = listing.unit_price;
+                }
+                max_buy = listing.unit_price;
+                cost += listing.unit_price;
+                listing.quantity.is_zero()
+            } else {
+                return None;
+            };
+
+            if remove {
+                self.buys.pop();
+            }
+        }
+
+        Some((cost, min_buy, max_buy))
+    }
+
+    /// Patient counterpart of `sell`: list at sell orders, filling from the
+    /// cheapest asks up. Returns (revenue after fees, highest ask filled).
+    pub fn sell_at_ask(&mut self, mut count: u32) -> Option<(Money, u32)> {
+        let mut revenue = Money::zero();
+        let mut max_ask = 0;
+
+        while count > 0 {
+            // sells are sorted in descending price
+            let remove = if let Some(listing) = self.sells.last_mut() {
+                listing.quantity -= 1;
+                count -= 1;
+                max_ask = listing.unit_price;
+                revenue +=
+                    Money::from_copper(listing.unit_price as i32).trading_post_sale_revenue();
+                listing.quantity.is_zero()
+            } else {
+                return None;
+            };
+
+            if remove {
+                self.sells.pop();
+            }
+        }
+
+        Some((revenue, max_ask))
+    }
+
+    /// Revenue side dispatcher: instant sells into bids, patient lists at asks.
+    fn sell_with_mode(&mut self, count: u32, patient: bool) -> Option<(Money, u32)> {
+        if patient {
+            self.sell_at_ask(count)
+        } else {
+            self.sell(count)
+        }
+    }
+
+    /// Cost side dispatcher: instant buys at asks, patient places bids.
+    fn buy_with_mode(&mut self, count: u32, patient: bool) -> Option<(u32, u32, u32)> {
+        if patient {
+            self.buy_at_bid(count)
+        } else {
+            self.buy(count)
+        }
+    }
+
     pub fn lowest_sell_offer(&self, mut quantity: u32) -> Option<u32> {
         debug_assert!(!quantity.is_zero());
 
@@ -531,6 +641,59 @@ impl ItemListings {
             Some(cost)
         }
     }
+
+    /// Patient counterpart of `lowest_sell_offer`: cheapest total for placing
+    /// buy orders, walking down from the best bids and skipping quantities
+    /// already reserved by pending patient purchases.
+    pub fn highest_buy_offer(&self, mut quantity: u32) -> Option<u32> {
+        debug_assert!(!quantity.is_zero());
+
+        let mut cost = 0;
+        let mut pending_sell_quantity = self.pending_sell_quantity;
+
+        for listing in self.buys.iter().rev() {
+            let mut remaining_listing_quantity = listing.quantity;
+            if pending_sell_quantity > 0 {
+                if pending_sell_quantity >= remaining_listing_quantity {
+                    pending_sell_quantity -= remaining_listing_quantity;
+                    remaining_listing_quantity = 0;
+                } else {
+                    remaining_listing_quantity -= pending_sell_quantity;
+                    pending_sell_quantity = 0;
+                }
+            }
+
+            if remaining_listing_quantity > 0 {
+                if remaining_listing_quantity < quantity {
+                    quantity -= remaining_listing_quantity;
+                    cost += remaining_listing_quantity * listing.unit_price;
+                } else {
+                    cost += quantity * listing.unit_price;
+                    quantity = 0;
+                }
+            }
+
+            if quantity.is_zero() {
+                break;
+            }
+        }
+
+        if quantity > 0 {
+            None
+        } else {
+            Some(cost)
+        }
+    }
+
+    /// Cost-estimate dispatcher: cheapest ask when instant, best bid when
+    /// patient (both skipping quantities reserved by pending purchases).
+    pub fn best_offer_with_mode(&self, quantity: u32, patient: bool) -> Option<u32> {
+        if patient {
+            self.highest_buy_offer(quantity)
+        } else {
+            self.lowest_sell_offer(quantity)
+        }
+    }
 }
 
 impl From<api::ItemListings> for ItemListings {
@@ -554,6 +717,7 @@ impl From<api::ItemListings> for ItemListings {
                 })
                 .collect(),
             pending_buy_quantity: 0,
+            pending_sell_quantity: 0,
         }
     }
 }

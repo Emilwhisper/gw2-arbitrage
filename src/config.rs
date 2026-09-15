@@ -39,6 +39,12 @@ pub static ASCENDED_VALUE: AtomicI64 = AtomicI64::new(0);
 /// a restart.
 pub static COUNT_LIMIT: AtomicI64 = AtomicI64::new(-1);
 
+/// Global price mode: false = instant (buy materials at sell orders, sell
+/// products at buy orders), true = patient (buy at buy orders, sell at sell
+/// orders, placing orders and waiting). Read live by the profit pipeline so
+/// the GUI can switch it without a restart. Initialized from `--patient`.
+pub static PRICE_PATIENT: AtomicBool = AtomicBool::new(false);
+
 /// Minimum marginal profit per crafted batch, in copper (`--threshold`).
 /// `0` means strictly profitable only; negative values widen the net (the GUI
 /// "Wider analysis (-1g)" right-click entry sets `-10000`, i.e. profit > -1g).
@@ -97,10 +103,8 @@ impl Config {
         config.crafting.include_timegated = opt.include_timegated;
         config.crafting.threshold = opt.threshold;
         config.crafting.value = opt.value;
-        PROFIT_THRESHOLD.store(
-            opt.threshold.map(i64::from).unwrap_or(0),
-            Ordering::Relaxed,
-        );
+        PROFIT_THRESHOLD.store(opt.threshold.map(i64::from).unwrap_or(0), Ordering::Relaxed);
+        PRICE_PATIENT.store(opt.patient, Ordering::Relaxed);
 
         config.output_csv = opt.output_csv;
         config.cli = opt.cli;
@@ -316,6 +320,11 @@ struct Opt {
     /// Threshold - min profit per item in copper
     #[structopt(long)]
     threshold: Option<u32>,
+
+    /// Patient pricing: buy materials at buy orders and sell products at sell
+    /// orders (place orders and wait) instead of instant flip prices
+    #[structopt(long)]
+    patient: bool,
 
     /// Run in console (CLI) mode even without other arguments
     #[structopt(long)]

@@ -67,10 +67,24 @@ pub fn calculate_estimated_min_crafting_cost(
         }
     });
 
+    // patient mode places buy orders instead of buying at asks
+    let patient = config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
     let tp_cost = tp_prices_map
         .get(&item_id)
-        .filter(|price| price.sells.quantity > 0)
-        .map(|price| Money::from_copper(price.sells.unit_price as i32));
+        .filter(|price| {
+            if patient {
+                price.buys.quantity > 0
+            } else {
+                price.sells.quantity > 0
+            }
+        })
+        .map(|price| {
+            Money::from_copper(if patient {
+                price.buys.unit_price as i32
+            } else {
+                price.sells.unit_price as i32
+            })
+        });
 
     let vendor_cost = item.and_then(|item| {
         item.vendor_cost()
@@ -311,9 +325,10 @@ pub fn calculate_precise_min_crafting_cost(
         None
     };
 
+    let patient = config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
     let tp_cost = tp_listings_map
         .get(&item_id)
-        .and_then(|listings| listings.lowest_sell_offer(item_count))
+        .and_then(|listings| listings.best_offer_with_mode(item_count, patient))
         .and_then(|offer| Some(Money::from_copper(offer as i32)));
 
     let vendor_data = item.and_then(|item| {
@@ -357,10 +372,12 @@ pub fn calculate_precise_min_crafting_cost(
             context.purchases.drain(purchases_ptr..)
         {
             if purchase_source == Source::TradingPost {
-                tp_listings_map
-                    .get_mut(&purchase_id)
-                    .unwrap()
-                    .pending_buy_quantity -= purchase_quantity;
+                let listing = tp_listings_map.get_mut(&purchase_id).unwrap();
+                if patient {
+                    listing.pending_sell_quantity -= purchase_quantity;
+                } else {
+                    listing.pending_buy_quantity -= purchase_quantity;
+                }
             }
         }
         context.items.crafted = crafted_backup;
@@ -370,21 +387,29 @@ pub fn calculate_precise_min_crafting_cost(
     // Mark for purchase
     if source == Source::TradingPost {
         context.purchases.push((item_id, item_count, source));
-        tp_listings_map
-            .get_mut(&item_id)
-            .unwrap()
-            .pending_buy_quantity += item_count;
+        let listing = tp_listings_map.get_mut(&item_id).unwrap();
+        if patient {
+            listing.pending_sell_quantity += item_count;
+        } else {
+            listing.pending_buy_quantity += item_count;
+        }
     }
     if source == Source::Vendor {
-        let (cost_per_item, purchase_count) = vendor_data.unwrap();
+        let (total_cost, purchase_count) = vendor_data.unwrap();
         let purchase = item_count.div_ceil(purchase_count) * purchase_count;
         context.purchases.push((item_id, purchase, source));
         if purchase > item_count {
             // Should never still have leftovers if we're buying more
             debug_assert!(context.items.leftovers.get(&item_id) == None);
+            // leftovers record PER-UNIT cost (consumed later as cost * count,
+            // like crafting leftovers); vendor_data holds the batch total
             context.items.leftovers.insert(
                 item_id,
-                (purchase - item_count, cost_per_item, Source::Vendor),
+                (
+                    purchase - item_count,
+                    total_cost / item_count,
+                    Source::Vendor,
+                ),
             );
         }
     }

@@ -183,6 +183,8 @@ struct App {
     /// loss tolerance (copper) applied by the last finished run: 0 = normal
     /// strictly-profitable run, negative = wide run keeping totals above it
     last_threshold: i64,
+    /// UI mirror of the live PRICE_PATIENT atomic (instant vs patient pricing)
+    price_patient: bool,
     status: String,
     sort_by_profit_desc: bool,
     favorites_only: bool,
@@ -310,6 +312,7 @@ struct GuiPrefs {
     velocity_windows: Option<Vec<String>>,
     worker_threads: Option<u32>,
     extra_filters: Option<ExtraFiltersPrefs>,
+    price_patient: Option<bool>,
 }
 
 const GUI_PREFS_FILE: &str = "gui_prefs.json";
@@ -347,6 +350,7 @@ impl App {
             market_snapshot: None,
             running: false,
             last_threshold: 0,
+            price_patient: crate::config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed),
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
                 .to_string(),
             sort_by_profit_desc: true,
@@ -632,6 +636,11 @@ impl App {
             self.filter_draft = fv.clone();
             self.filter_saved = fv;
         }
+        if let Some(patient) = prefs.price_patient {
+            // GUI-only setting (CLI mode uses --patient instead)
+            self.price_patient = patient;
+            crate::config::PRICE_PATIENT.store(patient, std::sync::atomic::Ordering::Relaxed);
+        }
         self
     }
 
@@ -655,6 +664,7 @@ impl App {
                     .collect(),
             ),
             worker_threads: Some(self.worker_threads),
+            price_patient: Some(self.price_patient),
             extra_filters: Some(ExtraFiltersPrefs {
                 min_velocity: self.filter_saved.min_velocity,
                 velocity_window: Some(self.filter_saved.velocity_window.clone()),
@@ -1155,6 +1165,33 @@ impl eframe::App for App {
                 ui.separator();
                 if ui.button("Settings").clicked() {
                     self.show_settings = true;
+                }
+                // instant = buy at asks, sell at bids; patient = buy at bids,
+                // sell at asks (place orders and wait). Applies to the next
+                // analysis run.
+                ui.label("Prices:");
+                let mut patient = self.price_patient;
+                egui::ComboBox::from_id_source("price_mode")
+                    .selected_text(if patient { "Patient" } else { "Instant" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut patient,
+                            false,
+                            "Instant (buy at asks, sell at bids)",
+                        );
+                        ui.selectable_value(
+                            &mut patient,
+                            true,
+                            "Patient (buy at bids, sell at asks)",
+                        );
+                    });
+                if patient != self.price_patient {
+                    self.price_patient = patient;
+                    crate::config::PRICE_PATIENT
+                        .store(patient, std::sync::atomic::Ordering::Relaxed);
+                    self.prefs_dirty = true;
+                    self.status =
+                        "Price mode changed: applies to the next analysis run.".to_string();
                 }
                 if self.running {
                     ui.spinner();
@@ -1985,20 +2022,41 @@ impl App {
             profitable_item.profit_per_crafting_step().to_copper_value(),
             (profitable_item.profit_on_cost() * 100_f64).round(),
         ));
+        // max_sell/min_sell are the highest/lowest *bids* filled in instant
+        // mode, or the cheapest/highest *asks* in patient mode (see
+        // calculate_crafting_profit), not a mixed range: word accordingly
+        let patient = crate::config::PRICE_PATIENT.load(std::sync::atomic::Ordering::Relaxed);
         let price_msg = if profitable_item.max_sell == profitable_item.min_sell {
-            format!("{}", profitable_item.min_sell)
+            if patient {
+                format!("ask {}", profitable_item.min_sell)
+            } else {
+                format!("bid {}", profitable_item.min_sell)
+            }
+        } else if patient {
+            // max_sell holds the cheapest ask here (init), min_sell the
+            // highest ask filled by the loop
+            format!(
+                "asks {} up to {}",
+                profitable_item.max_sell, profitable_item.min_sell,
+            )
         } else {
             format!(
-                "{} to {}",
+                "bids {} down to {}",
                 profitable_item.max_sell, profitable_item.min_sell,
             )
         };
         ui.label(format!(
-            "Sell at: {}, Money Required: {}, Breakeven price: {}",
+            "{} filled: {}, Money Required: {}, Breakeven price: {}",
+            if patient { "Asks" } else { "Bids" },
             price_msg,
             profitable_item.crafting_cost.increase_by_listing_fee(),
             profitable_item.breakeven,
         ));
+        if patient {
+            ui.small(
+                "Patient pricing: materials bought at buy orders, product sold at sell orders.",
+            );
+        }
 
         if !required_unknown_recipes.is_empty() {
             ui.separator();
