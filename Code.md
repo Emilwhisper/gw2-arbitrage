@@ -106,6 +106,27 @@ The `icon` URLs from `/v2/items` point to immutable PNGs, so they can be cached 
 
 ## GUI integration notes
 
+## GUI implementation (in progress, branch `GUI-test`)
+
+New/changed modules:
+- `src/analysis.rs` — library orchestration:
+  - `load_analysis(notify) -> Analysis { items_map, recipes_map, known_recipes }` (all the data loading that used to live in `main.rs`).
+  - `run_list_analysis(analysis, notify) -> Vec<ProfitableItem>` (prices → estimate → listings → exact profit).
+  - `run_item_analysis(analysis, item_id, notify) -> (Option<ProfitableItem>, purchased_ingredients, unknown_recipes, prices)` (shopping list for one item).
+  - `reset_data_files()` — deletes the cached items/recipes data files (icons + favorites preserved).
+- `src/icons.rs` — icon disk cache (`icons/<item_id>.png` under the cache dir), `get_icon(item_id, icon_url, notify) -> Option<PathBuf>`, atomic `.tmp`+rename writes, permanent (never expires).
+- `src/favorites.rs` — favorites persistence: `load()` / `save(&HashSet<u32>)` as `favorites.json` in the cache dir.
+- `src/config.rs` — new `--cli` flag stored in `CONFIG.cli`; `CONFIG.icons_dir` added.
+- `src/main.rs` — mode switch: **no arguments → GUI** (`gui::run()`); `--cli` or any arguments → console mode (`run_cli()`), unchanged behavior.
+- `src/gui.rs` — egui/eframe 0.27 app:
+  - Toolbar: "Run analysis", "Reset cache & re-run", "Export CSV…" (rfd save dialog, same columns as CLI), status/spinner.
+  - List: sortable by profit, per-row icon (lazy download via `icons.rs`, decoded to egui textures, placeholder on failure), ★ favorite toggle (pinned to top), favorites-only filter, discipline multi-filter checkboxes.
+  - Detail window on row click: icon, name, favorite toggle, links (GW2 wiki / gw2efficiency / gw2bltc), profit summary (count, sell-at range, money required, breakeven), unknown-recipe warning, shopping-list grid (source: Crafting/TradingPost/Vendor, ingredient, count, min price, total cost).
+  - Threading: analysis and item analysis run on background threads with their own tokio runtimes, communicating via `mpsc` events (`Progress`, `AnalysisDone`, `ItemDone`, `IconLoaded`, …); UI repaints while work is pending.
+- Cargo.toml additions: `eframe 0.27`, `image 0.25` (png only), `rfd 0.12`.
+
+Remaining known gaps (see `todo.md`): count/timegated/ascended options currently only settable at startup (global `CONFIG`); API key setting UI; per-item live price refresh; TP order book display; wallet auto-conversion.
+
 - `lib.rs` already exports everything (`pub mod ...`), so a GUI binary can reuse the data loading, crafting cost, and profit functions directly.
 - Coupling points to be aware of:
   - Global `CONFIG` (built from CLI args at process start) is read all over `crafting.rs`, `profit.rs`, `item.rs`, `money.rs`. A GUI should initialize it once (e.g. from GUI settings) or refactor these call sites to take options as parameters.

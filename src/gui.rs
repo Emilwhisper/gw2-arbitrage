@@ -569,9 +569,14 @@ impl App {
                 return;
             }
         };
+        let icon_url = item.icon.clone();
+        let item_name = item.to_string();
+        let is_favorite = self.favorites.contains(&item_id);
         ui.horizontal(|ui| {
-            ui.heading(item.to_string());
-            let is_favorite = self.favorites.contains(&item_id);
+            if let Some(tex) = self.icon_textures.get(&item_id).and_then(|t| t.as_ref()) {
+                ui.image((tex.id(), egui::vec2(32.0, 32.0)));
+            }
+            ui.heading(&item_name);
             if ui
                 .selectable_label(is_favorite, if is_favorite { "★" } else { "☆" })
                 .clicked()
@@ -579,6 +584,9 @@ impl App {
                 self.toggle_favorite(item_id);
             }
         });
+        if !self.icon_textures.contains_key(&item_id) {
+            self.request_icon(ui.ctx(), item_id, icon_url);
+        }
         ui.horizontal(|ui| {
             let name_urlencoded = item.name.replace(' ', "%20");
             ui.hyperlink_to(
