@@ -1,5 +1,12 @@
 # Changelog
 
+### v2.2.0
+
+#### Features
+
+* Faster scans (warm full scan ~3.5 min to under a minute): gzip-compressed API responses, prices fetched only for recipe-relevant items, and repeat runs within 5 minutes recompute from an in-memory market snapshot with zero downloads.
+* Scan progress counters (pages and batches) in the status line.
+
 ### v2.1.1
 
 #### Fixes
