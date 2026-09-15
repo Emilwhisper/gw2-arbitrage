@@ -1,13 +1,11 @@
-# CI for the GUI development branch: build + test on every push, targeting
-# Windows-first as per todo.md. Artifacts (gw2-arbitrage.exe) are uploaded on
-# every run so testers can grab the latest binary without tagging a release.
+# CI for the GUI: builds + tests on every push to any branch (so feature
+# branches such as Filter-test are compiled too), Windows-first as per todo.md.
+# Artifacts (gw2-arbitrage.exe) are uploaded on every run so testers can grab the
+# latest binary without tagging a release.
 name: GUI CI
 
 on:
   push:
-    branches:
-      - GUI-test0.1
-      - master
   pull_request:
     branches:
       - master
