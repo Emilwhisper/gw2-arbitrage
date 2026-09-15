@@ -165,7 +165,7 @@ pub async fn calc_item_profit(
             })
             .collect();
         let prices: Vec<api::Price> =
-            request::request_item_ids("commerce/prices", &recipe_items, None, notify)
+            request::request_item_ids("commerce/prices", &recipe_items, None, notify, false)
                 .await
                 .unwrap_or(Default::default()); // ignore "all ids provided are invalid" (and all other errors)
         recipe_prices = vec_to_map(prices, |x| x.id);

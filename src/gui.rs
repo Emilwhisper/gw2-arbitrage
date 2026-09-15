@@ -14,7 +14,7 @@ use eframe::egui;
 use egui::TextureHandle;
 use egui_extras::{Column, TableBuilder};
 
-use crate::analysis::{self, Analysis};
+use crate::analysis::{self, Analysis, MarketSnapshot};
 use crate::api;
 use crate::config;
 use crate::crafting;
@@ -28,7 +28,7 @@ use crate::velocity;
 
 enum Event {
     Progress(String),
-    AnalysisDone(Arc<Analysis>, Vec<ProfitableItem>),
+    AnalysisDone(Arc<Analysis>, Vec<ProfitableItem>, MarketSnapshot),
     AnalysisError(String),
     ItemDone(
         u32,
@@ -175,6 +175,10 @@ struct App {
     events_sender: Sender<Event>,
     analysis: Option<Arc<Analysis>>,
     profitable_items: Vec<ProfitableItem>,
+    /// last downloaded market data: runs within its freshness window recompute
+    /// locally instead of refetching (also makes back-to-back normal/wide runs
+    /// see identical data)
+    market_snapshot: Option<MarketSnapshot>,
     running: bool,
     /// whether the last finished run was a wide one (profit > -1g)
     last_run_wide: bool,
@@ -309,6 +313,7 @@ impl App {
             events_sender: tx,
             analysis: None,
             profitable_items: vec![],
+            market_snapshot: None,
             running: false,
             last_run_wide: false,
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
@@ -375,27 +380,46 @@ impl App {
             "Starting analysis...".to_string()
         };
         self.profitable_items.clear();
+        let threshold = crate::config::PROFIT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed);
+        let snapshot = self.market_snapshot.take();
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             let tx2 = tx.clone();
-            let result: Result<(Arc<Analysis>, Vec<ProfitableItem>), String> =
+            let result: Result<(Arc<Analysis>, Vec<ProfitableItem>, MarketSnapshot), String> =
                 runtime.block_on(async {
+                    let notify_tx = tx2.clone();
                     let notify = move |url: &str| {
-                        let _ = tx2.send(Event::Progress(format!("Fetching {}", url)));
+                        let _ = notify_tx.send(Event::Progress(format!("Fetching {}", url)));
                     };
                     let analysis = analysis::load_analysis(Some(&notify))
                         .await
                         .map_err(|e| e.to_string())?;
                     let analysis = Arc::new(analysis);
-                    let items = analysis::run_list_analysis(&analysis, Some(&notify))
+                    // reuse a fresh snapshot when it covers this run: instant,
+                    // and back-to-back runs compare identical market data
+                    if let Some(snapshot) = snapshot {
+                        if snapshot.covers(threshold) {
+                            if let Some(items) =
+                                analysis::compute_profitable_items(&analysis, &snapshot)
+                            {
+                                let _ = tx2.send(Event::Progress(
+                                    "Using fresh market snapshot (no download)…".to_string(),
+                                ));
+                                return Ok((analysis, items, snapshot));
+                            }
+                        }
+                    }
+                    let snapshot = analysis::fetch_market_snapshot(&analysis, Some(&notify))
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok((analysis, items))
+                    let items = analysis::compute_profitable_items(&analysis, &snapshot)
+                        .ok_or_else(|| "fresh market snapshot is missing listings".to_string())?;
+                    Ok((analysis, items, snapshot))
                 });
             match result {
-                Ok((analysis, items)) => {
-                    let _ = tx.send(Event::AnalysisDone(analysis, items));
+                Ok((analysis, items, snapshot)) => {
+                    let _ = tx.send(Event::AnalysisDone(analysis, items, snapshot));
                 }
                 Err(e) => {
                     let _ = tx.send(Event::AnalysisError(e));
@@ -910,8 +934,9 @@ impl App {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Progress(msg) => self.status = msg,
-                Event::AnalysisDone(analysis, mut items) => {
+                Event::AnalysisDone(analysis, mut items, snapshot) => {
                     self.analysis = Some(analysis);
+                    self.market_snapshot = Some(snapshot);
                     if self.last_run_wide {
                         // agreed bound for wide runs: keep totals above -1g
                         items.retain(|i| i.profit.to_copper_value() > WIDE_THRESHOLD_COPPER as i32);
@@ -1255,8 +1280,7 @@ impl eframe::App for App {
                         .checkbox(&mut vel_on, "Min velocity (units/day)")
                         .changed()
                     {
-                        self.filter_draft.min_velocity =
-                            if vel_on { Some(0.0) } else { None };
+                        self.filter_draft.min_velocity = if vel_on { Some(0.0) } else { None };
                     }
                     if self.filter_draft.min_velocity.is_some() {
                         ui.horizontal(|ui| {
@@ -1301,8 +1325,7 @@ impl eframe::App for App {
                         .checkbox(&mut pct_on, "Min profit % (profit on cost)")
                         .changed()
                     {
-                        self.filter_draft.min_profit_pct =
-                            if pct_on { Some(0.0) } else { None };
+                        self.filter_draft.min_profit_pct = if pct_on { Some(0.0) } else { None };
                     }
                     if self.filter_draft.min_profit_pct.is_some() {
                         ui.horizontal(|ui| {

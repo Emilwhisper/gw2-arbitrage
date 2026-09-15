@@ -30,8 +30,18 @@ const MAX_ATTEMPTS: u32 = 4;
 
 /// Shared HTTP client: connection reuse (no TLS handshake per request) and a
 /// per-request timeout so a hung connection can't stall a scan forever.
+///
+/// A truthful app User-Agent is set: besides identifying us, it (unlike the
+/// default library one) makes the API actually send gzip-compressed responses
+/// (~10x smaller bodies), which the `gzip` reqwest feature then decodes
+/// transparently.
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
+        .user_agent(concat!(
+            "gw2-arbitrage/",
+            env!("CARGO_PKG_VERSION"),
+            " (+https://github.com/Emilwhisper/gw2-arbitrage)"
+        ))
         .timeout(Duration::from_secs(60))
         .build()
         .expect("Failed to build HTTP client")
@@ -54,7 +64,7 @@ pub async fn fetch_item_listings(
     notify: Option<&dyn Fn(&str)>,
 ) -> Result<Vec<ItemListings>, Box<dyn std::error::Error>> {
     let mut tp_listings: Vec<ItemListings> =
-        request_item_ids("commerce/listings", item_ids, cache_dir, notify).await?;
+        request_item_ids("commerce/listings", item_ids, cache_dir, notify, false).await?;
 
     for listings in &mut tp_listings {
         // by default sells are listed in ascending and buys in descending price.
@@ -157,7 +167,11 @@ where
     };
 
     if let Some(notify) = notify {
-        notify(&url);
+        // page_total is known for every page but the first: show progress
+        match *page_total {
+            Some(total) => notify(&format!("{} [{}/{}]", url, page_no + 1, total)),
+            None => notify(&url),
+        }
     }
 
     let mut last_detail = String::new();
@@ -244,6 +258,11 @@ pub async fn request_item_ids<T>(
     item_ids: &[u32],
     cache_dir: Option<&PathBuf>,
     notify: Option<&dyn Fn(&str)>,
+    // when true, batches the API rejects with "all ids provided are invalid"
+    // contribute nothing instead of failing the whole call (targeted fetches
+    // over id sets that partly lack market data; missing entries simply mean
+    // "unobtainable here", like everywhere else in the estimate)
+    tolerate_invalid: bool,
 ) -> Result<Vec<T>, Box<dyn std::error::Error>>
 where
     T: serde::Serialize,
@@ -251,14 +270,24 @@ where
 {
     // fetch batches in parallel (`buffered` preserves batch order, so the
     // concatenated result is identical to the old sequential loop)
-    let batch_results = stream::iter(item_ids.chunks(MAX_ITEM_ID_LENGTH as usize).map(
-        |batch| async move {
+    let batches: Vec<_> = item_ids.chunks(MAX_ITEM_ID_LENGTH as usize).collect();
+    let total_batches = batches.len();
+    let batch_results = stream::iter(batches.into_iter().enumerate().map(
+        |(batch_no, batch)| async move {
             let item_ids_str: Vec<String> = batch.iter().map(|id| id.to_string()).collect();
             let url = format!(
                 "https://api.guildwars2.com/v2/{}?ids={}",
                 url_path,
                 item_ids_str.join(",")
             );
+            if let Some(notify) = notify.filter(|_| total_batches > 1) {
+                notify(&format!(
+                    "{} [batch {}/{}]",
+                    url,
+                    batch_no + 1,
+                    total_batches
+                ));
+            }
             if let Some(cache_dir) = cache_dir {
                 cached_fetch::<Vec<T>>(&url, cache_dir, notify).await
             } else {
@@ -271,8 +300,16 @@ where
     .await;
 
     let mut result = vec![];
-    for batch in batch_results.into_iter() {
-        result.extend(batch?.into_iter());
+    for batch_result in batch_results.into_iter() {
+        match batch_result {
+            Ok(batch) => result.extend(batch.into_iter()),
+            Err(e)
+                if tolerate_invalid && e.to_string().contains("all ids provided are invalid") =>
+            {
+                // a whole 200-id batch without market data: nothing to add
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(result)

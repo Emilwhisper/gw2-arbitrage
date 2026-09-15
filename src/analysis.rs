@@ -6,9 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use crate::api;
-use crate::config::CONFIG;
+use crate::config::{self, CONFIG};
 use crate::gw2efficiency;
 use crate::item::Item;
 use crate::profit;
@@ -108,6 +110,29 @@ pub async fn load_analysis(notify: Option<&dyn Fn(&str)>) -> Result<Analysis, Bo
     })
 }
 
+/// How long a fetched market snapshot is reused for (matches the API's own
+/// ~5-minute cache age).
+pub const MARKET_SNAPSHOT_TTL_SECS: u64 = 300;
+
+/// One download of everything the profit computation needs: aggregated prices
+/// plus the detailed listings for all candidate items and their ingredients.
+pub struct MarketSnapshot {
+    pub prices: HashMap<u32, api::Price>,
+    pub listings: HashMap<u32, api::ItemListings>,
+    /// threshold the snapshot was fetched with: it covers any run whose
+    /// threshold is greater or equal (a lower threshold only ever adds ids)
+    pub threshold: i64,
+    pub fetched_at: Instant,
+}
+
+impl MarketSnapshot {
+    /// Fresh enough and fetched with a low-enough threshold to serve a run.
+    pub fn covers(&self, threshold: i64) -> bool {
+        self.threshold <= threshold
+            && self.fetched_at.elapsed() < Duration::from_secs(MARKET_SNAPSHOT_TTL_SECS)
+    }
+}
+
 /// Full list analysis: fetch aggregated TP prices, estimate profitable items,
 /// then compute exact liquidity-aware profits using detailed listings.
 /// Returns profitable items sorted by profit (ascending, as produced by
@@ -116,12 +141,22 @@ pub async fn run_list_analysis(
     analysis: &Analysis,
     notify: Option<&dyn Fn(&str)>,
 ) -> Result<Vec<profit::ProfitableItem>, Box<dyn Error>> {
-    let tp_prices: Vec<api::Price> =
-        request::request_paginated("commerce/prices", &None, notify).await?;
-    let tp_prices_map = profit::vec_to_map(tp_prices, |x| x.id);
+    // CLI path: always fresh data
+    let snapshot = fetch_market_snapshot(analysis, notify).await?;
+    compute_profitable_items(analysis, &snapshot)
+        .ok_or_else(|| "fresh market snapshot is missing listings".into())
+}
+
+/// Download a fresh market snapshot (prices + listings for all candidates).
+pub async fn fetch_market_snapshot(
+    analysis: &Analysis,
+    notify: Option<&dyn Fn(&str)>,
+) -> Result<MarketSnapshot, Box<dyn Error>> {
+    let threshold = config::PROFIT_THRESHOLD.load(Ordering::Relaxed);
+    let prices = fetch_relevant_prices(analysis, notify).await?;
 
     let (profitable_item_ids, ingredient_ids) =
-        profit::find_profitable_items(&tp_prices_map, &analysis.recipes_map, &analysis.items_map);
+        profit::find_profitable_items(&prices, &analysis.recipes_map, &analysis.items_map);
 
     let mut request_listing_item_ids = vec![];
     request_listing_item_ids.extend(&profitable_item_ids);
@@ -130,17 +165,85 @@ pub async fn run_list_analysis(
     request_listing_item_ids.dedup();
     // Caching these is pointless, as the vector changes on each run, leading to new URLs
     let tp_listings = request::fetch_item_listings(&request_listing_item_ids, None, notify).await?;
-    let tp_listings_map = profit::vec_to_map(tp_listings, |x| x.id);
+    let listings = profit::vec_to_map(tp_listings, |x| x.id);
 
-    let profitable_items = profit::profitable_item_list(
-        &tp_listings_map,
+    Ok(MarketSnapshot {
+        prices,
+        listings,
+        threshold,
+        fetched_at: Instant::now(),
+    })
+}
+
+/// Recompute the profitable-items list from a snapshot without any network
+/// traffic. Returns `None` when the snapshot lacks listings the current
+/// threshold requires (caller should fetch fresh instead).
+pub fn compute_profitable_items(
+    analysis: &Analysis,
+    snapshot: &MarketSnapshot,
+) -> Option<Vec<profit::ProfitableItem>> {
+    let (profitable_item_ids, ingredient_ids) =
+        profit::find_profitable_items(&snapshot.prices, &analysis.recipes_map, &analysis.items_map);
+
+    let mut request_listing_item_ids = vec![];
+    request_listing_item_ids.extend(&profitable_item_ids);
+    request_listing_item_ids.extend(ingredient_ids);
+    request_listing_item_ids.sort_unstable();
+    request_listing_item_ids.dedup();
+    // Only the crafted items themselves must have order books (phase 2 reads
+    // those unconditionally). Ingredient books may legitimately be absent —
+    // untradable ingredients never have any, and vendor/crafted ones are never
+    // read — mirroring how `profitable_item_list` skips missing entries.
+    if !profitable_item_ids
+        .iter()
+        .all(|id| snapshot.listings.contains_key(id))
+    {
+        return None;
+    }
+
+    Some(profit::profitable_item_list(
+        &snapshot.listings,
         &profitable_item_ids,
         &request_listing_item_ids,
         &analysis.recipes_map,
         &analysis.items_map,
-    );
+    ))
+}
 
-    Ok(profitable_items)
+/// Above this many price-relevant ids, a full paginated dump is cheaper than
+/// one `?ids=` batch per 200 ids (~140 dump pages vs batches of 200).
+const TARGETED_PRICES_MAX_IDS: usize = 20_000;
+
+/// All item ids whose TP price the profitability estimate can possibly need:
+/// every recipe output plus every transitive ingredient.
+fn relevant_price_ids(recipes_map: &HashMap<u32, Recipe>) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(recipes_map.len() * 2);
+    for (output_id, recipe) in recipes_map {
+        ids.push(*output_id);
+        recipe.collect_ingredient_ids(recipes_map, &mut ids);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Fetch aggregated TP prices, restricted to recipe-relevant ids when that is
+/// cheaper than the full dump. The estimate only ever looks up prices for
+/// recipe outputs and (transitive) ingredients, so the result is equivalent.
+async fn fetch_relevant_prices(
+    analysis: &Analysis,
+    notify: Option<&dyn Fn(&str)>,
+) -> Result<HashMap<u32, api::Price>, Box<dyn Error>> {
+    let ids = relevant_price_ids(&analysis.recipes_map);
+    if ids.len() <= TARGETED_PRICES_MAX_IDS {
+        let tp_prices: Vec<api::Price> =
+            request::request_item_ids("commerce/prices", &ids, None, notify, true).await?;
+        Ok(profit::vec_to_map(tp_prices, |x| x.id))
+    } else {
+        let tp_prices: Vec<api::Price> =
+            request::request_paginated("commerce/prices", &None, notify).await?;
+        Ok(profit::vec_to_map(tp_prices, |x| x.id))
+    }
 }
 
 /// Single-item analysis: shopping list data for one item id.
