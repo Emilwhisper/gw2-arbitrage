@@ -1,3 +1,16 @@
+//! Binary entry point.
+//!
+//! Launch behaviour:
+//! - no arguments          -> graphical interface (no console window on Windows)
+//! - `--cli` or any option -> the original console mode
+//!
+//! On Windows the *release* binary is built as a GUI-subsystem executable so
+//! double-clicking it does not open a console window; console mode re-attaches
+//! to the console of the invoking terminal (see `win_console`). Debug builds
+//! keep the console so `cargo run` / tests behave normally.
+
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use colored::Colorize;
 use serde::Serialize;
 
@@ -14,8 +27,54 @@ use recipe::Recipe;
 
 const ITEM_STACK_SIZE: u32 = 250; // GW2 uses a "stack size" of 250
 
+/// Windows console handling for the GUI-subsystem release binary.
+///
+/// The release binary is built with `windows_subsystem = "windows"`, which means
+/// it has no console of its own. Console mode therefore has to attach itself to
+/// the console of the terminal that launched it, otherwise `--cli`, `--help` and
+/// `--version` would print nothing at all.
+#[cfg(all(windows, not(debug_assertions)))]
+mod win_console {
+    /// `ATTACH_PARENT_PROCESS` (a `DWORD` -1): attach to the parent's console.
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+        fn AllocConsole() -> i32;
+    }
+
+    /// Attach to the invoking terminal's console so `println!` output is
+    /// visible; if there is no parent console (e.g. launched from Explorer with
+    /// arguments) fall back to creating a new one.
+    ///
+    /// Must run before anything writes to stdout/stderr: Rust captures the
+    /// standard handles lazily on first use, so attaching first means the normal
+    /// printing path picks up the console handles. It must also run before
+    /// `CONFIG` is initialised, because `--help`/`--version` are printed by the
+    /// argument parser during that initialisation.
+    pub fn attach_or_alloc() {
+        // SAFETY: plain Win32 console API calls with constant arguments. Failure
+        // is reported through the return value and handled below.
+        unsafe {
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                AllocConsole();
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Any argument means console mode - including `--help`/`--version`, which the
+    // argument parser prints - so re-attach to the invoking terminal's console
+    // before anything writes to stdout. Only the bare double-click (no
+    // arguments) opens the GUI without a console.
+    #[cfg(all(windows, not(debug_assertions)))]
+    if std::env::args().count() > 1 {
+        win_console::attach_or_alloc();
+    }
+
     // GUI mode when launched with no arguments (double-click on Windows);
     // CLI mode with `--cli` or any other arguments.
     if std::env::args().count() == 1 && !CONFIG.cli {
@@ -65,8 +124,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|e| println!("Flush failed: {}", &e));
         };
         let profitable_items =
-            analysis::run_list_analysis(&analysis, Some(&commerce_notify as &dyn Fn(&str)))
-                .await?;
+            analysis::run_list_analysis(&analysis, Some(&commerce_notify as &dyn Fn(&str))).await?;
         println!("");
 
         print_item_list(

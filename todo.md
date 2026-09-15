@@ -47,7 +47,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [x] Remember GUI settings (filters: sort order, favorites-only, discipline selections) — persisted to `gui_prefs.json` in the cache dir.
 - [x] Settings window: GW2 API key editing, saved to the existing TOML config file (`gw2-arbitrage.toml`).
 - [ ] Friendly error dialogs (no internet, API key rejected, cache corrupt → suggest reset).
-- [ ] Hide the console window in GUI mode (build the GUI with `windows_subsystem = "windows"`, e.g. via a `src/bin/` split) so double-clicking opens only the GUI while CLI mode stays available. **Console intentionally kept for now (user decision).**
+- [x] Hide the console window in GUI mode: the release binary is built with `#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]`, so double-clicking opens **only the GUI**. CLI mode still works (`--cli`, `--help`, `--version`, any option): `main.rs` calls `AttachConsole(ATTACH_PARENT_PROCESS)` (falling back to `AllocConsole`) before anything prints, so output appears in the terminal that launched it. Debug builds keep the console so `cargo run`/tests behave normally. Verified in CI by reading the PE subsystem field of the built exe (must be 2 = GUI, not 3 = console) in both `gui-ci.yml` and `rust.yml`.
 
 ## Phase 5 — Extras
 - [ ] Auto-populate currency conversion values from `/v2/account/wallet` (API key).
