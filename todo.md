@@ -11,7 +11,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
   - [x] Store raw PNGs in a permanent `icons/` subfolder of the cache dir (`...\gw2-arbitrage\icons\<item_id>.png`); icons are immutable, no expiry, and `flush_cache` only deletes `cache_*` files so they survive `--reset-cache`.
   - [x] GUI renders item icons from the `icons.rs` disk cache: lazy per-row download on a background thread, decoded to egui textures, placeholder on failure.
   - [x] In-memory map of decoded images (`icon_textures: HashMap<u32, TextureHandle>`) so egui doesn't re-read files per frame.
-  - [ ] Optional "prefetch all icons" button using the existing parallel `stream::buffered` pattern.
+  - [x] "Prefetch icons" toolbar button: downloads/caches icons for every row in the list plus all favorites (skipping already-cached ones) with 4 worker threads and a progress indicator; icons are cached to disk, so this makes later runs instant/offline-friendly. (Only the already-displayed ids are prefetched — not the whole 60k item DB.)
   - [x] CLI mode ignores icons entirely (no impact on console output).
 - [x] Add shopping-list rendering as a function returning data (not just `println!`), so the detail window can reuse it.
 
@@ -29,7 +29,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 ## Phase 2 — Item detail window
 - [x] Clicking a row opens a detail window: icon (rarity-colored name), type, level, restrictions.
 - [x] Shopping list for the item (reuse the `item-id` code path): ingredients, quantities, buy-from-TP vs vendor vs craft decisions, total cost, exact profit.
-- [ ] Show full TP order book (top bids/asks) for the item if useful.
+- [x] Show the TP order book (top 5 bids/asks, collapsible) in the detail window — `calc_item_profit` now also returns the crafted item's own `api::ItemListings`.
 - [x] Links: gw2efficiency crafting calculator, GW2 wiki (`https://wiki.guildwars2.com/wiki/?search=…`), gw2bltc.
 - [x] "You don't know this recipe" warning when the recipe id is missing from account unlocks (requires API key).
 

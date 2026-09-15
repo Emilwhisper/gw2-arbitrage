@@ -130,6 +130,8 @@ pub async fn calc_item_profit(
         HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
         Vec<u32>,
         HashMap<u32, api::Price>,
+        // the crafted item's own TP order book (bids + asks), for display
+        Option<api::ItemListings>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -214,6 +216,7 @@ pub async fn calc_item_profit(
         purchased_ingredients,
         required_unknown_recipes,
         recipe_prices,
+        tp_listings_map.get(&item_id).cloned(),
     ))
 }
 

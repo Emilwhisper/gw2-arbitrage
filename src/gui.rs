@@ -36,9 +36,13 @@ enum Event {
         HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
         Vec<u32>,
         HashMap<u32, api::Price>,
+        Option<api::ItemListings>,
     ),
     ItemError(u32, String),
     IconLoaded(u32, Option<PathBuf>),
+    /// an icon was downloaded/cached in the background without being loaded as
+    /// a texture (used by the "Prefetch icons" button)
+    IconCached,
     VelocityLoaded(u32, Option<velocity::Velocity>, bool, bool),
 }
 
@@ -187,6 +191,8 @@ struct App {
     count_limit_enabled: bool,
     count_limit_input: u32,
     prefs_dirty: bool,
+    /// "Prefetch icons" progress: (done, total); `None` when not running
+    prefetch_progress: Option<(usize, usize)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -218,6 +224,7 @@ type DetailData = (
     HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
     Vec<u32>,
     HashMap<u32, api::Price>,
+    Option<api::ItemListings>,
 );
 
 impl App {
@@ -265,6 +272,7 @@ impl App {
                 }
             },
             prefs_dirty: false,
+            prefetch_progress: None,
         }
         .with_prefs(load_gui_prefs())
     }
@@ -321,7 +329,9 @@ impl App {
                 runtime.block_on(analysis::run_item_analysis(&analysis, item_id, None, refresh));
             match result {
                 Ok(data) => {
-                    let _ = tx.send(Event::ItemDone(item_id, data.0, data.1, data.2, data.3));
+                    let _ = tx.send(Event::ItemDone(
+                        item_id, data.0, data.1, data.2, data.3, data.4,
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(Event::ItemError(item_id, e.to_string()));
@@ -358,6 +368,63 @@ impl App {
             Some(texture)
         });
         self.icon_textures.insert(item_id, texture);
+    }
+
+    /// Download and cache icons for every item currently in the profitable list
+    /// (and every favorite), without loading them as textures. Icons are
+    /// permanent, so this only needs to run once per item and makes later runs
+    /// fast/offline-friendly.
+    fn spawn_icon_prefetch(&mut self) {
+        if self.prefetch_progress.is_some() {
+            return;
+        }
+        let analysis = match &self.analysis {
+            Some(a) => Arc::clone(a),
+            None => return,
+        };
+        // ids to fetch: everything currently displayed, plus favorites
+        let mut ids: Vec<u32> = self
+            .profitable_items
+            .iter()
+            .map(|i| i.id)
+            .chain(self.favorites.iter().copied())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        // skip icons that are already cached on disk
+        let ids: Vec<(u32, Option<String>)> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let icon_url = analysis.items_map.get(&id).and_then(|i| i.icon.clone());
+                let cached = icons::icon_path(&crate::config::CONFIG.icons_dir, id).is_file();
+                (!cached).then_some((id, icon_url))
+            })
+            .collect();
+        if ids.is_empty() {
+            self.status = "All icons are already cached".to_string();
+            return;
+        }
+        self.status = format!("Prefetching {} icons...", ids.len());
+        self.prefetch_progress = Some((0, ids.len()));
+        let queue = Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::from(ids),
+        ));
+        for _ in 0..4 {
+            let tx = self.events_sender.clone();
+            let queue = Arc::clone(&queue);
+            thread::spawn(move || {
+                let runtime =
+                    tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                loop {
+                    let job = queue.lock().expect("queue poisoned").pop_front();
+                    let Some((id, icon_url)) = job else {
+                        break;
+                    };
+                    let _ = runtime.block_on(icons::get_icon(id, icon_url.as_deref(), None));
+                    let _ = tx.send(Event::IconCached);
+                }
+            });
+        }
     }
 
     fn toggle_favorite(&mut self, item_id: u32) {
@@ -695,9 +762,10 @@ impl App {
                     self.running = false;
                     self.status = format!("Analysis failed: {}", e);
                 }
-                Event::ItemDone(item_id, profitable_item, purchased, unknown, prices) => {
+                Event::ItemDone(item_id, profitable_item, purchased, unknown, prices, order_book) => {
                     if self.detail_item_id == Some(item_id) {
-                        self.detail = Some((profitable_item, purchased, unknown, prices));
+                        self.detail =
+                            Some((profitable_item, purchased, unknown, prices, order_book));
                         self.detail_loading = false;
                     }
                 }
@@ -709,6 +777,15 @@ impl App {
                 }
                 Event::IconLoaded(item_id, path) => {
                     self.load_icon_texture(ctx, item_id, path);
+                }
+                Event::IconCached => {
+                    if let Some((done, total)) = &mut self.prefetch_progress {
+                        *done += 1;
+                        if *done >= *total {
+                            self.status = format!("Prefetched {} icons", total);
+                            self.prefetch_progress = None;
+                        }
+                    }
                 }
                 Event::VelocityLoaded(item_id, v, fetched_hourly, fetched_daily) => {
                     if fetched_hourly {
@@ -764,7 +841,12 @@ impl eframe::App for App {
         self.flush_prefs();
 
         // keep repainting while background work is running
-        if self.running || self.detail_loading || !self.pending_icons.is_empty() || !self.velocities_requested.is_empty() {
+        if self.running
+            || self.detail_loading
+            || !self.pending_icons.is_empty()
+            || !self.velocities_requested.is_empty()
+            || self.prefetch_progress.is_some()
+        {
             ctx.request_repaint();
         }
 
@@ -785,6 +867,9 @@ impl eframe::App for App {
                         if ui.button("Export CSV...").clicked() {
                             self.export_csv();
                         }
+                        if ui.button("Prefetch icons").clicked() {
+                            self.spawn_icon_prefetch();
+                        }
                     },
                 );
                 ui.separator();
@@ -793,6 +878,10 @@ impl eframe::App for App {
                 }
                 if self.running {
                     ui.spinner();
+                }
+                if let Some((done, total)) = self.prefetch_progress {
+                    ui.spinner();
+                    ui.label(format!("Prefetching icons ({}/{})", done, total));
                 }
                 ui.label(&self.status);
             });
@@ -1353,7 +1442,8 @@ impl App {
                 return;
             }
         };
-        let (profitable_item, purchased_ingredients, required_unknown_recipes, _prices) = data;
+        let (profitable_item, purchased_ingredients, required_unknown_recipes, _prices, order_book) =
+            data;
 
         let profitable_item = match profitable_item {
             Some(pi) => pi,
@@ -1402,6 +1492,57 @@ impl App {
                 ui.spinner();
             }
         });
+
+        // Trading post order book (best asks/bids) for the crafted item
+        if let Some(book) = order_book {
+            ui.separator();
+            egui::CollapsingHeader::new("Trading post order book (top 5 each side)")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let mut asks: Vec<(u32, u32)> = book
+                        .sells
+                        .iter()
+                        .map(|l| (l.unit_price, l.quantity))
+                        .collect();
+                    let mut bids: Vec<(u32, u32)> = book
+                        .buys
+                        .iter()
+                        .map(|l| (l.unit_price, l.quantity))
+                        .collect();
+                    // best ask = lowest price, best bid = highest price
+                    asks.sort_unstable_by_key(|(price, _)| *price);
+                    bids.sort_unstable_by_key(|(price, _)| std::cmp::Reverse(*price));
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.strong("Sell orders (asks)");
+                            if asks.is_empty() {
+                                ui.label("none");
+                            }
+                            for (price, quantity) in asks.iter().take(5) {
+                                ui.label(format!(
+                                    "{} x{}",
+                                    Money::from_copper(*price as i32),
+                                    quantity
+                                ));
+                            }
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            ui.strong("Buy orders (bids)");
+                            if bids.is_empty() {
+                                ui.label("none");
+                            }
+                            for (price, quantity) in bids.iter().take(5) {
+                                ui.label(format!(
+                                    "{} x{}",
+                                    Money::from_copper(*price as i32),
+                                    quantity
+                                ));
+                            }
+                        });
+                    });
+                });
+        }
 
         ui.strong("Shopping list");
         egui::ScrollArea::vertical().show(ui, |ui| {

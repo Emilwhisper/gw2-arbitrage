@@ -162,6 +162,7 @@ pub async fn run_item_analysis(
         HashMap<(u32, crate::crafting::Source), crate::crafting::PurchasedIngredient>,
         Vec<u32>,
         HashMap<u32, api::Price>,
+        Option<api::ItemListings>,
     ),
     Box<dyn Error>,
 > {

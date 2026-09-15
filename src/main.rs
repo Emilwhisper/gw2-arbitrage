@@ -38,8 +38,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if let Some(item_id) = CONFIG.item_id {
-        let (profitable_item, purchased_ingredients, required_unknown_recipes, recipe_prices) =
-            analysis::run_item_analysis(&analysis, item_id, notify, false).await?;
+        let (
+            profitable_item,
+            purchased_ingredients,
+            required_unknown_recipes,
+            recipe_prices,
+            _order_book,
+        ) = analysis::run_item_analysis(&analysis, item_id, notify, false).await?;
         print_profitable_item(
             item_id,
             &profitable_item,

@@ -112,16 +112,16 @@ New/changed modules:
 - `src/analysis.rs` — library orchestration:
   - `load_analysis(notify) -> Analysis { items_map, recipes_map, known_recipes }` (all the data loading that used to live in `main.rs`).
   - `run_list_analysis(analysis, notify) -> Vec<ProfitableItem>` (prices → estimate → listings → exact profit).
-  - `run_item_analysis(analysis, item_id, notify) -> (Option<ProfitableItem>, purchased_ingredients, unknown_recipes, prices)` (shopping list for one item).
+  - `run_item_analysis(analysis, item_id, notify, refresh) -> (Option<ProfitableItem>, purchased_ingredients, unknown_recipes, prices, order_book)` (shopping list + the crafted item's own TP order book for one item).
   - `reset_data_files()` — deletes the cached items/recipes data files (icons + favorites preserved).
 - `src/icons.rs` — icon disk cache (`icons/<item_id>.png` under the cache dir), `get_icon(item_id, icon_url, notify) -> Option<PathBuf>`, atomic `.tmp`+rename writes, permanent (never expires).
 - `src/favorites.rs` — favorites persistence: `load()` / `save(&HashSet<u32>)` as `favorites.json` in the cache dir.
 - `src/config.rs` — new `--cli` flag stored in `CONFIG.cli`; `CONFIG.icons_dir` added; `INCLUDE_TIMEGATED` atomic (CLI flag OR `include_timegated` key in the TOML config) read live by `crafting.rs` so the GUI toggle applies to the next analysis run; GUI Settings writes both `api_key` and `include_timegated` back to the TOML config file.
 - `src/main.rs` — mode switch: **no arguments → GUI** (`gui::run()`); `--cli` or any arguments → console mode (`run_cli()`), unchanged behavior.
 - `src/gui.rs` — egui/eframe 0.27 app:
-  - Toolbar: "Run analysis", "Reset cache & re-run", "Export CSV…" (rfd save dialog, same columns as CLI), status/spinner.
+  - Toolbar: "Run analysis", "Reset cache & re-run", "Export CSV…" (rfd save dialog, same columns as CLI), "Prefetch icons" (caches icons for the listed items + favorites on 4 worker threads, progress in the toolbar; `Event::IconCached` just counts — no textures are created), "Settings", status/spinner.
   - List: sortable by clicking any column header (click again to flip direction; favorites stay pinned on top), per-row icon (lazy download via `icons.rs`, decoded to egui textures, placeholder on failure), ★ favorite toggle (pinned to top), favorites-only filter, discipline multi-filter checkboxes, and per-window velocity columns (only the enabled ones are rendered — the table is built dynamically from the enabled set).
-  - Detail window on row click: icon, name, favorite toggle, links (GW2 wiki / gw2efficiency / gw2bltc), profit summary (count, sell-at range, money required, breakeven), unknown-recipe warning, shopping-list grid (source: Crafting/TradingPost/Vendor, ingredient, count, min price, total cost).
+  - Detail window on row click: icon, name, favorite toggle, links (GW2 wiki / gw2efficiency / gw2bltc), sell velocity per enabled window, profit summary (count, sell-at range, money required, breakeven), unknown-recipe warning, collapsible TP order book (top 5 asks/bids, sorted by best price), shopping-list grid (source: Crafting/TradingPost/Vendor, ingredient, count, min price, total cost).
   - Threading: analysis and item analysis run on background threads with their own tokio runtimes, communicating via `mpsc` events (`Progress`, `AnalysisDone`, `ItemDone`, `IconLoaded`, …); UI repaints while work is pending.
 - `src/velocity.rs` — sell-velocity estimates from the community datawars2.ie TP history API:
   - `fetch_velocity(item_id, fetch_hourly, fetch_daily) -> Velocity` with per-window units/day: 6h/12h/24h from the hourly endpoint, 7d/2w/1m/3m/6m/1y/2y from the daily endpoint (`start=YYYY-MM-DD` = today − 735 days; ISO — unix timestamps do NOT work, verified empirically; multi-ID is not supported either).
@@ -133,7 +133,7 @@ New/changed modules:
   - The item detail window lists the velocity of every enabled window for that item, and fetches it on demand (`request_item_velocity`) when the item has not been processed by the workers yet.
 - Cargo.toml additions: `eframe 0.27`, `egui_extras 0.27` (TableBuilder for the sortable, resizable, full-width table), `image 0.25` (png only), `rfd 0.12`.
 
-Remaining known gaps (see `todo.md`): TP order book display; wallet auto-conversion; background auto-refresh; feature parity extras (material-bank awareness, `--include-ascended` / `--count` are now in the Settings UI).
+Remaining known gaps (see `todo.md`): wallet auto-conversion; background auto-refresh; material-bank awareness; friendly error dialogs; console window still appears in GUI mode (intentionally kept for now).
 
 - `lib.rs` already exports everything (`pub mod ...`), so a GUI binary can reuse the data loading, crafting cost, and profit functions directly.
 - Coupling points to be aware of:
