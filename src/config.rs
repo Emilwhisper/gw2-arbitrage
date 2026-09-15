@@ -6,6 +6,7 @@ use std::io::Read;
 use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use once_cell::sync::Lazy;
@@ -17,6 +18,11 @@ use toml;
 use lazy_static::lazy_static;
 
 pub const CACHE_PREFIX: &str = "cache_";
+
+/// Global toggle for including timegated recipes (Deldrimor Steel Ingot etc).
+/// Read live by the crafting-cost calculations so the GUI can flip it without
+/// a restart. Initialized from the CLI flag or the config file.
+pub static INCLUDE_TIMEGATED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Default)]
 pub struct CraftingOptions {
@@ -89,6 +95,11 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from("gw2-arbitrage.toml"));
 
         config.api_key = file.api_key;
+
+        // timegated flag: CLI flag OR saved config-file setting
+        let include_timegated = opt.include_timegated || file.include_timegated.unwrap_or(false);
+        config.crafting.include_timegated = include_timegated;
+        INCLUDE_TIMEGATED.store(include_timegated, Ordering::Relaxed);
 
         config.lang = if let Some(_) = opt.lang {
             opt.lang
@@ -229,6 +240,7 @@ struct ConfigFile {
     // API key requires scope unlocks
     api_key: Option<String>,
     lang: Option<String>,
+    include_timegated: Option<bool>,
     currencies: Option<ConfigFileCurrencySection>,
     blacklist: Option<ConfigFileBlacklistSection>,
 }

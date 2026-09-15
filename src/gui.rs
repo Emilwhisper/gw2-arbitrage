@@ -346,19 +346,23 @@ impl App {
         }
     }
 
-    fn save_api_key(&mut self) {
+    /// Write a single top-level key into the TOML config file, preserving any
+    /// other content. `None` removes the key.
+    fn write_config_key(&mut self, key: &str, value: Option<toml::Value>) {
         let path = crate::config::CONFIG.config_file_path.clone();
-        let key = self.api_key_input.trim().to_string();
         let result = (|| -> Result<(), String> {
             let mut table: toml::Value = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| toml::from_str(&s).ok())
                 .unwrap_or_else(|| toml::Value::Table(Default::default()));
             if let Some(t) = table.as_table_mut() {
-                if key.is_empty() {
-                    t.remove("api_key");
-                } else {
-                    t.insert("api_key".into(), toml::Value::String(key));
+                match value {
+                    Some(v) => {
+                        t.insert(key.into(), v);
+                    }
+                    None => {
+                        t.remove(key);
+                    }
                 }
             }
             let out = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
@@ -368,12 +372,24 @@ impl App {
             std::fs::write(&path, out).map_err(|e| e.to_string())
         })();
         self.status = match result {
-            Ok(_) => format!(
-                "Saved API key to {}. Restart the app to apply it.",
-                path.display()
-            ),
+            Ok(_) => format!("Saved to {}. Restart the app to fully apply.", path.display()),
             Err(e) => format!("Failed to save config: {}", e),
         };
+    }
+
+    fn save_api_key(&mut self) {
+        let key = self.api_key_input.trim().to_string();
+        let value = if key.is_empty() {
+            None
+        } else {
+            Some(toml::Value::String(key))
+        };
+        self.write_config_key("api_key", value);
+    }
+
+    fn set_include_timegated(&mut self, enabled: bool) {
+        crate::config::INCLUDE_TIMEGATED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.write_config_key("include_timegated", Some(toml::Value::Boolean(enabled)));
     }
 
     /// Kick off background workers that fetch sell-velocity data for every
@@ -632,11 +648,27 @@ impl eframe::App for App {
                     ui.label("Enables the \"you may not know these recipes\" warnings.");
                     ui.add_space(4.0);
                     ui.text_edit_singleline(&mut self.api_key_input);
-                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             self.save_api_key();
                         }
+                    });
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let mut timegated =
+                        crate::config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(
+                            &mut timegated,
+                            "Include timegated recipes (e.g. Deldrimor Steel Ingot)",
+                        )
+                        .changed()
+                    {
+                        self.set_include_timegated(timegated);
+                    }
+                    ui.small("Takes effect on the next analysis run and is remembered.");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
                             self.show_settings = false;
                         }
