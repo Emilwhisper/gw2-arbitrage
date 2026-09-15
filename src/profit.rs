@@ -312,6 +312,14 @@ pub fn calculate_crafting_profit(
         if buy_price < crafting_cost + threshold {
             break;
         }
+        // In wide (negative-threshold) mode, stop before the running total
+        // breaches the bound: otherwise a mildly profitable top of the book
+        // gets dragged under -1g by its own deep order book, and the item
+        // vanishes from the wide list even though the normal run shows it.
+        // Never fires for threshold >= 0, so normal/CLI runs are unaffected.
+        if threshold < Money::zero() && listing_profit + (buy_price - crafting_cost) < threshold {
+            break;
+        }
 
         listing_profit += buy_price - crafting_cost;
         total_crafting_cost += crafting_cost;
