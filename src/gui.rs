@@ -180,8 +180,9 @@ struct App {
     /// see identical data)
     market_snapshot: Option<MarketSnapshot>,
     running: bool,
-    /// whether the last finished run was a wide one (profit > -1g)
-    last_run_wide: bool,
+    /// loss tolerance (copper) applied by the last finished run: 0 = normal
+    /// strictly-profitable run, negative = wide run keeping totals above it
+    last_threshold: i64,
     status: String,
     sort_by_profit_desc: bool,
     favorites_only: bool,
@@ -224,10 +225,23 @@ struct App {
     worker_threads: u32,
 }
 
-/// Wide-analysis loss tolerance, in copper (-1 gold). Wide runs keep crafting
-/// while each batch stays above this marginal loss, and the list keeps rows
+/// Loss tolerances for the analysis modes, in copper. Wide runs keep crafting
+/// while each batch stays above the marginal loss, and the list keeps rows
 /// with total profit above it.
-const WIDE_THRESHOLD_COPPER: i64 = -10_000;
+const WIDE_50S_COPPER: i64 = -5_000;
+const WIDE_1G_COPPER: i64 = -10_000;
+const WIDE_2G_COPPER: i64 = -20_000;
+
+/// Human label for an analysis threshold, used in status messages.
+fn threshold_label(threshold: i64) -> &'static str {
+    match threshold {
+        WIDE_50S_COPPER => "profit > -50s",
+        WIDE_1G_COPPER => "profit > -1g",
+        WIDE_2G_COPPER => "profit > -2g",
+        _ => "profitable",
+    }
+}
+
 
 /// Bounds for the "Background worker threads" setting.
 const MIN_WORKER_THREADS: u32 = 1;
@@ -315,7 +329,7 @@ impl App {
             profitable_items: vec![],
             market_snapshot: None,
             running: false,
-            last_run_wide: false,
+            last_threshold: 0,
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
                 .to_string(),
             sort_by_profit_desc: true,
@@ -361,21 +375,18 @@ impl App {
         .with_prefs(load_gui_prefs())
     }
 
-    fn spawn_analysis(&mut self, wide: bool) {
+    fn spawn_analysis(&mut self, threshold: i64) {
         if self.running {
             return;
         }
-        // live threshold for this run: 0 = strictly profitable,
-        // -1g = wide net (also used by the item detail window, so it agrees
+        // live threshold for this run: 0 = strictly profitable, negative =
+        // wide net (also used by the item detail window, so it agrees
         // with the list until the next run switches modes)
-        crate::config::PROFIT_THRESHOLD.store(
-            if wide { WIDE_THRESHOLD_COPPER } else { 0 },
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.last_run_wide = wide;
+        crate::config::PROFIT_THRESHOLD.store(threshold, std::sync::atomic::Ordering::Relaxed);
+        self.last_threshold = threshold;
         self.running = true;
-        self.status = if wide {
-            "Starting wide analysis (profit > -1g)...".to_string()
+        self.status = if threshold < 0 {
+            format!("Starting wide analysis ({})...", threshold_label(threshold))
         } else {
             "Starting analysis...".to_string()
         };
@@ -937,15 +948,16 @@ impl App {
                 Event::AnalysisDone(analysis, mut items, snapshot) => {
                     self.analysis = Some(analysis);
                     self.market_snapshot = Some(snapshot);
-                    if self.last_run_wide {
-                        // agreed bound for wide runs: keep totals above -1g
-                        items.retain(|i| i.profit.to_copper_value() > WIDE_THRESHOLD_COPPER as i32);
+                    if self.last_threshold < 0 {
+                        // agreed bound for wide runs: keep totals above it
+                        items.retain(|i| i.profit.to_copper_value() as i64 > self.last_threshold);
                     }
                     self.profitable_items = items;
                     self.running = false;
-                    self.status = if self.last_run_wide {
+                    self.status = if self.last_threshold < 0 {
                         format!(
-                            "Done (wide, profit > -1g): {} items",
+                            "Done (wide, {}): {} items",
+                            threshold_label(self.last_threshold),
                             self.profitable_items.len()
                         )
                     } else {
@@ -1055,24 +1067,32 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!self.running, |ui| {
                     // left-click = normal analysis; right-click opens the
-                    // analysis mode menu (normal / wider than -1g)
+                    // analysis mode menu (normal / wider than -50s/-1g/-2g)
                     let run_response = ui.button("Run analysis");
                     if run_response.clicked() {
-                        self.spawn_analysis(false);
+                        self.spawn_analysis(0);
                     }
                     run_response.context_menu(|ui| {
                         if ui.button("Normal analysis").clicked() {
-                            self.spawn_analysis(false);
+                            self.spawn_analysis(0);
+                            ui.close_menu();
+                        }
+                        if ui.button("Wider analysis (-50s)").clicked() {
+                            self.spawn_analysis(WIDE_50S_COPPER);
                             ui.close_menu();
                         }
                         if ui.button("Wider analysis (-1g)").clicked() {
-                            self.spawn_analysis(true);
+                            self.spawn_analysis(WIDE_1G_COPPER);
+                            ui.close_menu();
+                        }
+                        if ui.button("Wider analysis (-2g)").clicked() {
+                            self.spawn_analysis(WIDE_2G_COPPER);
                             ui.close_menu();
                         }
                     });
                     if ui.button("Reset cache & re-run").clicked() {
                         analysis::reset_data_files();
-                        self.spawn_analysis(false);
+                        self.spawn_analysis(0);
                     }
                 });
                 ui.add_enabled_ui(
