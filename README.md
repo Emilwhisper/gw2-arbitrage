@@ -1,4 +1,4 @@
-# gw2-arbitrage
+# gw2-arbitrage ( Potato Fork )
 
 [![Crates.io][crates_img]][crates_link]
 
