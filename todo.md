@@ -47,6 +47,6 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 
 ## Phase 5 — Extras
 - [ ] Auto-populate currency conversion values from `/v2/account/wallet` (API key).
-- [ ] Per-item "refresh prices now" in the detail window.
+- [x] Per-item "refresh prices now" in the detail window (bypasses the listings cache via `calc_item_profit(refresh: true)`).
 - [ ] Material-bank awareness (`/v2/account/materials`) to compute profit using owned materials.
 - [ ] Background auto-refresh of the list on a timer.
