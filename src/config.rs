@@ -210,7 +210,15 @@ impl Config {
 }
 
 fn get_file_config(file: &Option<PathBuf>) -> Result<ConfigFile, Box<dyn std::error::Error>> {
-    let mut file = File::open(config_file(file)?)?;
+    let path = config_file(file)?;
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        // A missing config file is normal (first run); use defaults silently.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ConfigFile::default())
+        }
+        Err(e) => return Err(e.into()),
+    };
     let mut s = String::new();
     file.read_to_string(&mut s)?;
     Ok(toml::from_str(&s)?)
@@ -425,6 +433,8 @@ pub enum Discipline {
     Charge,
     Achievement,
     Growing,
+    // Janthir Wilds homestead crafting
+    Homesteader,
 }
 
 impl Discipline {
@@ -438,6 +448,8 @@ impl Discipline {
             "A" | "S" => format!("{}{}", &s[..1], &s[2..3]),
             // take 1st and 4th characters to distinguish Chef/Charge
             "C" => format!("{}{}", &s[..1], &s[3..4]),
+            // Homesteader → "Ho"
+            "H" => format!("{}{}", &s[..1], &s[1..2]),
             l => l.to_string(),
         }
     }

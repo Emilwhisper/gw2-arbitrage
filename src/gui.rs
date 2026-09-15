@@ -565,6 +565,7 @@ impl App {
                 "Tailor",
                 "Weaponsmith",
                 "Scribe",
+                "Homesteader",
                 "Achievement",
             ] {
                 let Some(discipline) = variant.parse::<config::Discipline>().ok() else { continue };
