@@ -14,6 +14,7 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Shared HTTP client. Reusing a single client keeps the connection pool
@@ -60,9 +61,37 @@ struct CachedVelocity {
     velocity: Velocity,
 }
 
-/// Path of the per-item velocity cache file (`velocity_<item_id>.json`).
+/// Folder inside the cache dir holding per-item velocity files.
+///
+/// They live in a subfolder to avoid cluttering the cache directory root with
+/// one file per item (`%LOCALAPPDATA%\gw2-arbitrage\velocity\<item_id>.json`).
+pub const VELOCITY_DIR: &str = "velocity";
+
+/// Path of the per-item velocity cache file for the current layout.
 pub fn cache_path(cache_dir: &Path, item_id: u32) -> PathBuf {
-    cache_dir.join(format!("velocity_{}.json", item_id))
+    cache_dir
+        .join(VELOCITY_DIR)
+        .join(format!("{}.json", item_id))
+}
+
+/// Legacy layout: `velocity_<item_id>.json` files sitting directly in the cache
+/// dir. Delete any leftovers once per process - they are only a 24h cache, so
+/// nothing worth migrating is lost, and the folder already holds newer copies.
+fn remove_legacy_files_once(cache_dir: &Path) {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("velocity_") && name.ends_with(".json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Load a fresh (within `CACHE_TTL_SECS`) cache entry, if any.
@@ -272,6 +301,7 @@ pub async fn fetch_velocity_cached(
     fetch_hourly: bool,
     fetch_daily: bool,
 ) -> Result<(Velocity, bool, bool), String> {
+    remove_legacy_files_once(cache_dir);
     let cached = load_cache(cache_dir, item_id);
     let have_hourly = cached.as_ref().is_some_and(|c| c.hourly);
     let have_daily = cached.as_ref().is_some_and(|c| c.daily);
