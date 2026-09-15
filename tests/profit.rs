@@ -254,8 +254,7 @@ fn calculate_crafting_profit_agony_infusion_profitable_test() {
             max_sell: Money::from_copper(7982220),
             min_sell: Money::from_copper(7982200),
             // (4 * 1100000 + 3 * 1496 / 10) / (85 / 100)
-            breakeven: (Money::from_copper(1100000 * 4)
-                + (Money::from_copper(1496) / 10) * 3)
+            breakeven: (Money::from_copper(1100000 * 4) + (Money::from_copper(1496) / 10) * 3)
                 .trading_post_listing_price(),
             crafting_steps: 6,
             crafted_items: CraftedItems { crafted, leftovers },

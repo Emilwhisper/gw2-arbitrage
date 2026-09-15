@@ -177,11 +177,7 @@ pub async fn fetch_velocity(
             .await
             .map_err(|e| e.to_string())?;
 
-        for (hours, out) in [
-            (6, 0usize),
-            (12, 1),
-            (24, 2),
-        ] {
+        for (hours, out) in [(6, 0usize), (12, 1), (24, 2)] {
             let cutoff = now - hours * 3600;
             let buckets: Vec<&Bucket> = rows
                 .iter()

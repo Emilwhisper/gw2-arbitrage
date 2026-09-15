@@ -177,8 +177,7 @@ pub async fn calc_item_profit(
         Some(&CONFIG.cache_dir)
     };
     let tp_listings =
-        request::fetch_item_listings(&request_listing_item_ids, listings_cache_dir, notify)
-            .await?;
+        request::fetch_item_listings(&request_listing_item_ids, listings_cache_dir, notify).await?;
     let tp_listings_map = vec_to_map(tp_listings, |x| x.id);
 
     let mut purchased_ingredients = Default::default();

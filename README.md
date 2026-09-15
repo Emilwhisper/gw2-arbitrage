@@ -9,7 +9,8 @@ Finds items in Guild Wars 2 that can be sold on the trading post for a higher pr
 
 ## Usage
 
-1. Download the latest release for your platform from https://github.com/t-mw/gw2-arbitrage/releases and extract the zip contents.
+1. Download the latest release from https://github.com/Emilwhisper/gw2-arbitrage/releases (releases are named `gw2-arbitrageUI`) and extract the zip contents.
+1. Run `gw2-arbitrage.exe` with **no arguments** to open the graphical interface, or pass `--cli` (or any option, e.g. `--help`) to use the original console mode.
 1. If running Windows, open Command Prompt or PowerShell from the Start Menu. PowerShell is the better choice on Windows 7+. If running Linux or MacOS, open your terminal application.
 1. Navigate to the extracted folder using the terminal application.
 1. Run the `gw2-arbitrage` binary using the terminal application (i.e. on Windows run `gw2-arbitrage.exe` from PowerShell) to produce a list of items that can be crafted and immediately resold

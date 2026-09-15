@@ -1,4 +1,4 @@
-﻿//! Minimal egui/eframe GUI for gw2-arbitrage.
+//! Minimal egui/eframe GUI for gw2-arbitrage.
 //!
 //! Runs the analysis pipeline from `analysis.rs` on a background thread and
 //! displays the profitable items in a list. Clicking an item opens a detail
@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::thread;
 
 use eframe::egui;
-use egui_extras::{Column, TableBuilder};
 use egui::TextureHandle;
+use egui_extras::{Column, TableBuilder};
 
 use crate::analysis::{self, Analysis};
 use crate::api;
@@ -274,8 +274,7 @@ impl App {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 >= 0,
             count_limit_input: {
-                let limit =
-                    crate::config::COUNT_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+                let limit = crate::config::COUNT_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
                 if limit > 0 {
                     limit as u32
                 } else {
@@ -300,8 +299,8 @@ impl App {
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             let tx2 = tx.clone();
-            let result: Result<(Arc<Analysis>, Vec<ProfitableItem>), String> = runtime
-                .block_on(async {
+            let result: Result<(Arc<Analysis>, Vec<ProfitableItem>), String> =
+                runtime.block_on(async {
                     let notify = move |url: &str| {
                         let _ = tx2.send(Event::Progress(format!("Fetching {}", url)));
                     };
@@ -337,8 +336,9 @@ impl App {
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            let result =
-                runtime.block_on(analysis::run_item_analysis(&analysis, item_id, None, refresh));
+            let result = runtime.block_on(analysis::run_item_analysis(
+                &analysis, item_id, None, refresh,
+            ));
             match result {
                 Ok(data) => {
                     let _ = tx.send(Event::ItemDone(
@@ -418,9 +418,7 @@ impl App {
         }
         self.status = format!("Prefetching {} icons...", ids.len());
         self.prefetch_progress = Some((0, ids.len()));
-        let queue = Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::from(ids),
-        ));
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(ids)));
         for _ in 0..self.worker_threads {
             let tx = self.events_sender.clone();
             let queue = Arc::clone(&queue);
@@ -541,7 +539,10 @@ impl App {
             std::fs::write(&path, out).map_err(|e| e.to_string())
         })();
         self.status = match result {
-            Ok(_) => format!("Saved to {}. Restart the app to fully apply.", path.display()),
+            Ok(_) => format!(
+                "Saved to {}. Restart the app to fully apply.",
+                path.display()
+            ),
             Err(e) => format!("Failed to save config: {}", e),
         };
     }
@@ -618,9 +619,9 @@ impl App {
         for (id, _, _) in &jobs {
             self.velocities_requested.insert(*id);
         }
-        let queue = Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::from(jobs),
-        ));
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            jobs,
+        )));
         for _ in 0..self.worker_threads {
             let tx = self.events_sender.clone();
             let queue = Arc::clone(&queue);
@@ -757,7 +758,9 @@ impl App {
                 item.count.to_string(),
                 item.profit_per_item().to_copper_value().to_string(),
                 item.crafting_steps.to_string(),
-                item.profit_per_crafting_step().to_copper_value().to_string(),
+                item.profit_per_crafting_step()
+                    .to_copper_value()
+                    .to_string(),
                 ((item.profit_on_cost() * 100_f64).round() as i64).to_string(),
             ]);
         }
@@ -785,15 +788,21 @@ impl App {
                     self.analysis = Some(analysis);
                     self.profitable_items = items;
                     self.running = false;
-                    self.status =
-                        format!("Done: {} profitable items", self.profitable_items.len());
+                    self.status = format!("Done: {} profitable items", self.profitable_items.len());
                     self.spawn_velocity_workers();
                 }
                 Event::AnalysisError(e) => {
                     self.running = false;
                     self.status = format!("Analysis failed: {}", e);
                 }
-                Event::ItemDone(item_id, profitable_item, purchased, unknown, prices, order_book) => {
+                Event::ItemDone(
+                    item_id,
+                    profitable_item,
+                    purchased,
+                    unknown,
+                    prices,
+                    order_book,
+                ) => {
                     if self.detail_item_id == Some(item_id) {
                         self.detail =
                             Some((profitable_item, purchased, unknown, prices, order_book));
@@ -849,7 +858,6 @@ impl App {
         }
     }
 }
-
 
 /// GW2 rarity colors.
 fn rarity_color(rarity: &Rarity) -> egui::Color32 {
@@ -1106,7 +1114,9 @@ impl App {
                 "Homesteader",
                 "Achievement",
             ] {
-                let Some(discipline) = variant.parse::<config::Discipline>().ok() else { continue };
+                let Some(discipline) = variant.parse::<config::Discipline>().ok() else {
+                    continue;
+                };
                 let mut checked = self.discipline_filter.contains(&discipline);
                 if ui.checkbox(&mut checked, variant).changed() {
                     if checked {
@@ -1142,31 +1152,32 @@ impl App {
             .filter(|i| {
                 self.discipline_filter.is_empty()
                     || analysis.recipes_map.get(&i.id).is_some_and(|r| {
-                        r.disciplines.iter().any(|d| self.discipline_filter.contains(d))
+                        r.disciplines
+                            .iter()
+                            .any(|d| self.discipline_filter.contains(d))
                     })
             })
             .filter(|i| i.count > 0)
             .collect();
 
-        let item_info =
-            |analysis: &Analysis, id: u32| -> (String, String) {
-                let name = analysis
-                    .items_map
-                    .get(&id)
-                    .map_or_else(|| "???".to_string(), |i| i.to_string());
-                let disciplines = analysis
-                    .recipes_map
-                    .get(&id)
-                    .map(|r: &Recipe| {
-                        r.disciplines
-                            .iter()
-                            .map(|d| d.get_abbrev())
-                            .collect::<Vec<_>>()
-                            .join("/")
-                    })
-                    .unwrap_or_default();
-                (name, disciplines)
-            };
+        let item_info = |analysis: &Analysis, id: u32| -> (String, String) {
+            let name = analysis
+                .items_map
+                .get(&id)
+                .map_or_else(|| "???".to_string(), |i| i.to_string());
+            let disciplines = analysis
+                .recipes_map
+                .get(&id)
+                .map(|r: &Recipe| {
+                    r.disciplines
+                        .iter()
+                        .map(|d| d.get_abbrev())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_default();
+            (name, disciplines)
+        };
 
         let sort_key = |i: &ProfitableItem| -> (f64, String) {
             let (name, disciplines) = item_info(analysis, i.id);
@@ -1202,16 +1213,11 @@ impl App {
             let fav = (!favorites.contains(&a.id)).cmp(&(!favorites.contains(&b.id)));
             let ka = sort_key(a);
             let kb = sort_key(b);
-            let value = ka
-                .0
-                .partial_cmp(&kb.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(ka.1.cmp(&kb.1));
-            let value = if sort_desc {
-                value.reverse()
-            } else {
-                value
-            };
+            let value =
+                ka.0.partial_cmp(&kb.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(ka.1.cmp(&kb.1));
+            let value = if sort_desc { value.reverse() } else { value };
             fav.then(value)
         });
 
@@ -1264,7 +1270,11 @@ impl App {
                     header.col(|ui| {
                         let is_active = sort_column == col;
                         let arrow = if is_active {
-                            if sort_desc { " \u{25bc}" } else { " \u{25b2}" }
+                            if sort_desc {
+                                " \u{25bc}"
+                            } else {
+                                " \u{25b2}"
+                            }
                         } else {
                             ""
                         };
@@ -1380,7 +1390,6 @@ impl App {
             self.sort_desc = desc;
         }
 
-
         if let Some(item_id) = clicked {
             self.request_item_detail(item_id, false);
         }
@@ -1434,7 +1443,10 @@ impl App {
             let name_urlencoded = item.name.replace(' ', "%20");
             ui.hyperlink_to(
                 "Wiki",
-                format!("https://wiki.guildwars2.com/wiki/Special:Search?search={}", name_urlencoded),
+                format!(
+                    "https://wiki.guildwars2.com/wiki/Special:Search?search={}",
+                    name_urlencoded
+                ),
             );
             ui.hyperlink_to(
                 "gw2efficiency",
@@ -1445,16 +1457,20 @@ impl App {
             );
             ui.hyperlink_to(
                 "gw2bltc",
-                format!("https://www.gw2bltc.com/en/tp/search?q={}&p=item", name_urlencoded),
+                format!(
+                    "https://www.gw2bltc.com/en/tp/search?q={}&p=item",
+                    name_urlencoded
+                ),
             );
         });
 
         // sell velocity (units/day) for the enabled windows
-        let velocity_windows: Vec<(&str, fn(&velocity::Velocity) -> Option<f64>)> = VELOCITY_COLUMNS
-            .iter()
-            .filter(|(c, _, _)| self.velocity_enabled(*c))
-            .map(|(_, label, accessor)| (*label, *accessor))
-            .collect();
+        let velocity_windows: Vec<(&str, fn(&velocity::Velocity) -> Option<f64>)> =
+            VELOCITY_COLUMNS
+                .iter()
+                .filter(|(c, _, _)| self.velocity_enabled(*c))
+                .map(|(_, label, accessor)| (*label, *accessor))
+                .collect();
         if !velocity_windows.is_empty() {
             ui.separator();
             ui.strong("Sell velocity (units/day)");
@@ -1531,7 +1547,10 @@ impl App {
 
         if !required_unknown_recipes.is_empty() {
             ui.separator();
-            ui.colored_label(egui::Color32::RED, "WARNING: you may not know these recipes:");
+            ui.colored_label(
+                egui::Color32::RED,
+                "WARNING: you may not know these recipes:",
+            );
             ui.label(format!("{:?}", required_unknown_recipes));
         }
 
@@ -1629,5 +1648,3 @@ impl App {
         }
     }
 }
-
-

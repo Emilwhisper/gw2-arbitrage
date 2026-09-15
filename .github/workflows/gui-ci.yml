@@ -6,7 +6,8 @@ name: GUI CI
 on:
   push:
     branches:
-      - GUI-test
+      - GUI-test0.1
+      - master
   pull_request:
     branches:
       - master
@@ -30,6 +31,18 @@ jobs:
 
       - name: Run cargo build (release)
         run: cargo build --release --locked
+
+      - name: Verify the binary is GUI-subsystem (no console window)
+        shell: pwsh
+        run: |
+          $exe = "target/release/gw2-arbitrage.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+          $subsystem = [System.BitConverter]::ToUInt16($bytes, $peOffset + 0x5C)
+          Write-Host "PE subsystem = $subsystem (2 = GUI/no console, 3 = console)"
+          if ($subsystem -ne 2) {
+            throw "Expected GUI subsystem so double-clicking opens no console window, got $subsystem"
+          }
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4

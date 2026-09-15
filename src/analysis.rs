@@ -26,9 +26,7 @@ pub struct Analysis {
 /// Load the cached-or-downloaded item and recipe databases, apply blacklists,
 /// and build lookup maps. `notify` receives status messages (URLs) suitable
 /// for progress display.
-pub async fn load_analysis(
-    notify: Option<&dyn Fn(&str)>,
-) -> Result<Analysis, Box<dyn Error>> {
+pub async fn load_analysis(notify: Option<&dyn Fn(&str)>) -> Result<Analysis, Box<dyn Error>> {
     let known_recipes = if let Some(key) = &CONFIG.api_key {
         match request::fetch_account_recipes(key, &CONFIG.cache_dir, notify).await {
             Ok(recipes) => Some(recipes),
@@ -122,11 +120,8 @@ pub async fn run_list_analysis(
         request::request_paginated("commerce/prices", &None, notify).await?;
     let tp_prices_map = profit::vec_to_map(tp_prices, |x| x.id);
 
-    let (profitable_item_ids, ingredient_ids) = profit::find_profitable_items(
-        &tp_prices_map,
-        &analysis.recipes_map,
-        &analysis.items_map,
-    );
+    let (profitable_item_ids, ingredient_ids) =
+        profit::find_profitable_items(&tp_prices_map, &analysis.recipes_map, &analysis.items_map);
 
     let mut request_listing_item_ids = vec![];
     request_listing_item_ids.extend(&profitable_item_ids);
@@ -134,8 +129,7 @@ pub async fn run_list_analysis(
     request_listing_item_ids.sort_unstable();
     request_listing_item_ids.dedup();
     // Caching these is pointless, as the vector changes on each run, leading to new URLs
-    let tp_listings =
-        request::fetch_item_listings(&request_listing_item_ids, None, notify).await?;
+    let tp_listings = request::fetch_item_listings(&request_listing_item_ids, None, notify).await?;
     let tp_listings_map = profit::vec_to_map(tp_listings, |x| x.id);
 
     let profitable_items = profit::profitable_item_list(
@@ -194,4 +188,3 @@ pub fn reset_data_files() -> Vec<std::path::PathBuf> {
     }
     removed
 }
-

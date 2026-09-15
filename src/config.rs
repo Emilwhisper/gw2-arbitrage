@@ -105,8 +105,8 @@ impl Config {
                 ConfigFile::default()
             }
         };
-        config.config_file_path = config_file(&opt.config_file)
-            .unwrap_or_else(|_| PathBuf::from("gw2-arbitrage.toml"));
+        config.config_file_path =
+            config_file(&opt.config_file).unwrap_or_else(|_| PathBuf::from("gw2-arbitrage.toml"));
 
         config.api_key = file.api_key;
 
@@ -248,9 +248,7 @@ fn get_file_config(file: &Option<PathBuf>) -> Result<ConfigFile, Box<dyn std::er
     let mut file = match File::open(&path) {
         Ok(file) => file,
         // A missing config file is normal (first run); use defaults silently.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ConfigFile::default())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ConfigFile::default()),
         Err(e) => return Err(e.into()),
     };
     let mut s = String::new();

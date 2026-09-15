@@ -37,7 +37,9 @@ pub fn calculate_estimated_min_crafting_cost(
     let output_item_count = recipe.map(|recipe| recipe.output_item_count).unwrap_or(1);
 
     let crafting_cost = recipe.and_then(|recipe| {
-        if !config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed) && recipe.is_timegated() {
+        if !config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed)
+            && recipe.is_timegated()
+        {
             None
         } else {
             let mut cost = Money::zero();
@@ -270,7 +272,9 @@ pub fn calculate_precise_min_crafting_cost(
 
     let leftovers_backup = context.items.leftovers.clone();
     let crafting_cost_per_item = recipe.and_then(|recipe| {
-        if !config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed) && recipe.is_timegated() {
+        if !config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed)
+            && recipe.is_timegated()
+        {
             return None;
         }
 

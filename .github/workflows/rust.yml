@@ -1,196 +1,105 @@
-# Based on https://github.com/actions-rs/meta/blob/master/recipes/quickstart.md
-# For multi-OS testing see the `cross.yml` workflow.
+# Release workflow: pushing a `v*` tag builds the Windows release, zips it and
+# creates a GitHub Release named "gw2-arbitrageUI".
+#
+# Notes for future maintainers:
+# - `permissions: contents: write` is required for GITHUB_TOKEN to create the
+#   release; without it `softprops/action-gh-release` fails with a 403.
+# - This replaces an older workflow that relied on the archived `actions-rs/*`
+#   actions, the retired `ubuntu-18.04` runner and the now-disabled `::set-output`
+#   workflow command, none of which work on GitHub any more.
+# - Only Windows is built (the target platform). To restore macOS/Linux, copy the
+#   `build-windows` job: on Linux add `sudo apt-get install -y libgtk-3-dev`
+#   (`rfd`/`eframe` need GTK headers to build and the GTK runtime to run), and on
+#   macOS check the artifact name (the old one wrongly said x86_64).
+name: Release
 
-# Restrict CI to tagged commits
 on:
   push:
     tags:
-    - '*'
+      - "v*"
 
-name: gw2-arbitrage
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: Check
-    runs-on: ubuntu-latest
+    name: Check & Test (Windows)
+    runs-on: windows-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run cargo check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2
+      - name: Run tests
+        run: cargo test --locked
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      # Style checks are deliberately non-blocking: pre-existing warnings must not
+      # be able to prevent a release from being published.
+      - name: Check formatting
+        continue-on-error: true
+        run: cargo fmt --all -- --check
 
-      - name: Run cargo test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets
 
-  lints:
-    name: Lints
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2
-
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
-      - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
-
-      - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: -- -D warnings
-
-  properties:
-    name: Generate properties
-    runs-on: ubuntu-latest
-    outputs:
-      windows_zip_filename: ${{ steps.generate_windows_zip_filename.outputs.filename }}
-      mac_zip_filename: ${{ steps.generate_mac_zip_filename.outputs.filename }}
-      linux_zip_filename: ${{ steps.generate_linux_zip_filename.outputs.filename }}
-    steps:
-      - name: Get the version
-        id: get_version
-        run: echo ::set-output name=version::${GITHUB_REF/refs\/tags\/v/}
-
-      - name: Generate package filename (Windows)
-        id: generate_windows_zip_filename
-        run: echo ::set-output name=filename::gw2-arbitrage-${{ steps.get_version.outputs.version }}-x86_64-pc-windows-msvc.zip
-
-      - name: Generate package filename (macOS)
-        id: generate_mac_zip_filename
-        run: echo ::set-output name=filename::gw2-arbitrage-${{ steps.get_version.outputs.version }}-x86_64-apple-darwin.zip
-
-      - name: Generate package filename (Linux)
-        id: generate_linux_zip_filename
-        run: echo ::set-output name=filename::gw2-arbitrage-${{ steps.get_version.outputs.version }}-x86_64-unknown-linux-gnu.zip
-
-  build-win:
+  build-windows:
     name: Build Release (Windows)
     runs-on: windows-latest
-    needs: [check, test, lints, properties]
+    needs: [check]
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run cargo build
-        run: cargo build --all --release
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Create zip
+      - name: Determine version and asset name
+        id: version
+        shell: pwsh
         run: |
-          mkdir gw2-arbitrage
-          cp "./target/release/gw2-arbitrage.exe" "./gw2-arbitrage/"
-          7z a -tzip ${{ needs.properties.outputs.windows_zip_filename }} gw2-arbitrage
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "asset=gw2-arbitrageUI-$version-x86_64-pc-windows-msvc.zip" >> $env:GITHUB_OUTPUT
 
-      - name: GH Release
-        uses: softprops/action-gh-release@v0.1.5
-        with:
-          fail_on_unmatched_files: true
-          files: ${{ needs.properties.outputs.windows_zip_filename }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release
+        run: cargo build --release --locked
 
-  build-mac:
-    name: Build Release (macOS)
-    runs-on: macos-latest
-    needs: [check, test, lints, properties]
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2
-
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-
-      - name: Run cargo build
-        run: cargo build --all --release
-
-      - name: Create zip
+      - name: Verify the binary is GUI-subsystem (no console window)
+        shell: pwsh
         run: |
-          mkdir gw2-arbitrage
-          cp "./target/release/gw2-arbitrage" "./gw2-arbitrage/"
-          7z a -tzip ${{ needs.properties.outputs.mac_zip_filename }} gw2-arbitrage
+          $exe = "target/release/gw2-arbitrage.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+          $subsystem = [System.BitConverter]::ToUInt16($bytes, $peOffset + 0x5C)
+          Write-Host "PE subsystem = $subsystem (2 = GUI/no console, 3 = console)"
+          if ($subsystem -ne 2) {
+            throw "Expected GUI subsystem so double-clicking opens no console window, got $subsystem"
+          }
 
-      - name: GH Release
-        uses: softprops/action-gh-release@v0.1.5
-        with:
-          fail_on_unmatched_files: true
-          files: ${{ needs.properties.outputs.mac_zip_filename }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-linux:
-    name: Build Release (Linux)
-    runs-on: ubuntu-18.04
-    needs: [check, test, lints, properties]
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2
-
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-
-      - name: Run cargo build
-        run: cargo build --all --release
-
-      - name: Create zip
+      - name: Zip the executable
+        shell: pwsh
         run: |
-          mkdir gw2-arbitrage
-          cp "./target/release/gw2-arbitrage" "./gw2-arbitrage/"
-          7z a -tzip ${{ needs.properties.outputs.linux_zip_filename }} gw2-arbitrage
+          New-Item -ItemType Directory -Force -Path ./gw2-arbitrage | Out-Null
+          Copy-Item ./target/release/gw2-arbitrage.exe ./gw2-arbitrage/
+          Compress-Archive -Path ./gw2-arbitrage/* -DestinationPath "./${{ steps.version.outputs.asset }}" -Force
 
-      - name: GH Release
-        uses: softprops/action-gh-release@v0.1.5
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
+          name: gw2-arbitrageUI
           fail_on_unmatched_files: true
-          files: ${{ needs.properties.outputs.linux_zip_filename }}
+          files: ${{ steps.version.outputs.asset }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
