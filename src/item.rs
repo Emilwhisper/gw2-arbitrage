@@ -23,6 +23,8 @@ pub struct Item {
     restrictions: Vec<String>,
     upgrades_into: Option<Vec<Upgrade>>,
     upgrades_from: Option<Vec<Upgrade>>,
+    #[serde(default)]
+    pub icon: Option<String>,
     details: Option<Details>,
 }
 
@@ -46,6 +48,7 @@ impl From<ApiItem> for Item {
             restrictions: item.restrictions,
             upgrades_into: item.upgrades_into,
             upgrades_from: item.upgrades_from,
+            icon: item.icon,
             details: details,
         }
     }

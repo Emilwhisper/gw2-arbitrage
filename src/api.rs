@@ -65,6 +65,8 @@ pub struct ApiItem {
     pub upgrades_into: Option<Vec<item::Upgrade>>,
     pub upgrades_from: Option<Vec<item::Upgrade>>,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
     pub details: Option<serde_json::Value>,
 }
 
