@@ -176,6 +176,8 @@ struct App {
     analysis: Option<Arc<Analysis>>,
     profitable_items: Vec<ProfitableItem>,
     running: bool,
+    /// whether the last finished run was a wide one (profit > -1g)
+    last_run_wide: bool,
     status: String,
     sort_by_profit_desc: bool,
     favorites_only: bool,
@@ -217,6 +219,11 @@ struct App {
     /// background worker threads used for velocity / icon fetching
     worker_threads: u32,
 }
+
+/// Wide-analysis loss tolerance, in copper (-1 gold). Wide runs keep crafting
+/// while each batch stays above this marginal loss, and the list keeps rows
+/// with total profit above it.
+const WIDE_THRESHOLD_COPPER: i64 = -10_000;
 
 /// Bounds for the "Background worker threads" setting.
 const MIN_WORKER_THREADS: u32 = 1;
@@ -303,6 +310,7 @@ impl App {
             analysis: None,
             profitable_items: vec![],
             running: false,
+            last_run_wide: false,
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
                 .to_string(),
             sort_by_profit_desc: true,
@@ -348,12 +356,24 @@ impl App {
         .with_prefs(load_gui_prefs())
     }
 
-    fn spawn_analysis(&mut self) {
+    fn spawn_analysis(&mut self, wide: bool) {
         if self.running {
             return;
         }
+        // live threshold for this run: 0 = strictly profitable,
+        // -1g = wide net (also used by the item detail window, so it agrees
+        // with the list until the next run switches modes)
+        crate::config::PROFIT_THRESHOLD.store(
+            if wide { WIDE_THRESHOLD_COPPER } else { 0 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.last_run_wide = wide;
         self.running = true;
-        self.status = "Starting analysis...".to_string();
+        self.status = if wide {
+            "Starting wide analysis (profit > -1g)...".to_string()
+        } else {
+            "Starting analysis...".to_string()
+        };
         self.profitable_items.clear();
         let tx = self.events_sender.clone();
         thread::spawn(move || {
@@ -890,11 +910,22 @@ impl App {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Progress(msg) => self.status = msg,
-                Event::AnalysisDone(analysis, items) => {
+                Event::AnalysisDone(analysis, mut items) => {
                     self.analysis = Some(analysis);
+                    if self.last_run_wide {
+                        // agreed bound for wide runs: keep totals above -1g
+                        items.retain(|i| i.profit.to_copper_value() > WIDE_THRESHOLD_COPPER as i32);
+                    }
                     self.profitable_items = items;
                     self.running = false;
-                    self.status = format!("Done: {} profitable items", self.profitable_items.len());
+                    self.status = if self.last_run_wide {
+                        format!(
+                            "Done (wide, profit > -1g): {} items",
+                            self.profitable_items.len()
+                        )
+                    } else {
+                        format!("Done: {} profitable items", self.profitable_items.len())
+                    };
                     self.spawn_velocity_workers();
                 }
                 Event::AnalysisError(e) => {
@@ -998,12 +1029,25 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!self.running, |ui| {
-                    if ui.button("Run analysis").clicked() {
-                        self.spawn_analysis();
+                    // left-click = normal analysis; right-click opens the
+                    // analysis mode menu (normal / wider than -1g)
+                    let run_response = ui.button("Run analysis");
+                    if run_response.clicked() {
+                        self.spawn_analysis(false);
                     }
+                    run_response.context_menu(|ui| {
+                        if ui.button("Normal analysis").clicked() {
+                            self.spawn_analysis(false);
+                            ui.close_menu();
+                        }
+                        if ui.button("Wider analysis (-1g)").clicked() {
+                            self.spawn_analysis(true);
+                            ui.close_menu();
+                        }
+                    });
                     if ui.button("Reset cache & re-run").clicked() {
                         analysis::reset_data_files();
-                        self.spawn_analysis();
+                        self.spawn_analysis(false);
                     }
                 });
                 ui.add_enabled_ui(

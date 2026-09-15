@@ -21,6 +21,11 @@ pub fn find_profitable_items(
 ) -> (Vec<u32>, Vec<u32>) {
     let mut profitable_item_ids = vec![];
     let mut ingredient_ids = vec![];
+    // live threshold (GUI normal/wide modes); 0 keeps the historical
+    // strictly-profitable behavior byte-identical
+    let threshold = Money::from_copper(
+        config::PROFIT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) as i32,
+    );
     for (item_id, recipe) in recipes_map {
         if let Some(item) = items_map.get(item_id) {
             // we cannot sell restricted items
@@ -64,7 +69,7 @@ pub fn find_profitable_items(
         ) {
             let effective_buy_price =
                 Money::from_copper(tp_prices.buys.unit_price as i32).trading_post_sale_revenue();
-            if effective_buy_price > crafting_cost {
+            if effective_buy_price > crafting_cost + threshold {
                 profitable_item_ids.push(*item_id);
                 if let Some(recipe) = recipes_map.get(&item_id) {
                     recipe.collect_ingredient_ids(&recipes_map, &mut ingredient_ids);
@@ -237,7 +242,11 @@ pub fn calculate_crafting_profit(
 
     let recipe = recipes_map.get(&item_id);
     let output_item_count = recipe.map(|recipe| recipe.output_item_count).unwrap_or(1);
-    let threshold = Money::from_copper(opt.threshold.unwrap_or(0) as i32);
+    // live threshold shared with `find_profitable_items` (GUI normal/wide
+    // modes); initialized from `--threshold`, so CLI behavior is unchanged
+    let threshold = Money::from_copper(
+        config::PROFIT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) as i32,
+    );
 
     let mut listing_profit = Money::zero();
     let mut total_crafting_cost = Money::zero();

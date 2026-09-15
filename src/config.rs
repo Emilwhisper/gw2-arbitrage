@@ -39,6 +39,13 @@ pub static ASCENDED_VALUE: AtomicI64 = AtomicI64::new(0);
 /// a restart.
 pub static COUNT_LIMIT: AtomicI64 = AtomicI64::new(-1);
 
+/// Minimum marginal profit per crafted batch, in copper (`--threshold`).
+/// `0` means strictly profitable only; negative values widen the net (the GUI
+/// "Wider analysis (-1g)" right-click entry sets `-10000`, i.e. profit > -1g).
+/// Read live by the profit pipeline so the GUI can switch modes without a
+/// restart. Initialized from the `--threshold` CLI flag.
+pub static PROFIT_THRESHOLD: AtomicI64 = AtomicI64::new(0);
+
 #[derive(Debug, Default)]
 pub struct CraftingOptions {
     pub include_timegated: bool,
@@ -90,6 +97,10 @@ impl Config {
         config.crafting.include_timegated = opt.include_timegated;
         config.crafting.threshold = opt.threshold;
         config.crafting.value = opt.value;
+        PROFIT_THRESHOLD.store(
+            opt.threshold.map(i64::from).unwrap_or(0),
+            Ordering::Relaxed,
+        );
 
         config.output_csv = opt.output_csv;
         config.cli = opt.cli;
