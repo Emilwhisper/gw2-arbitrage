@@ -153,7 +153,20 @@ pub fn run() -> Result<(), eframe::Error> {
     eframe::run_native(
         "gw2-arbitrage",
         options,
-        Box::new(|_cc| Box::new(App::new())),
+        Box::new(|cc| {
+            // Solid scrollbars: full-size idle bars in a reserved gutter,
+            // instead of the default tiny floating bars that overlay the
+            // table content. `bar_width` matches the old hover width, so the
+            // hovered state looks the same as before.
+            let mut style = (*cc.egui_ctx.style()).clone();
+            style.spacing.scroll = egui::style::ScrollStyle {
+                floating: false,
+                bar_width: 10.0,
+                ..egui::style::ScrollStyle::solid()
+            };
+            cc.egui_ctx.set_style(style);
+            Box::new(App::new())
+        }),
     )
 }
 
