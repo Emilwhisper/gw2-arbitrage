@@ -468,6 +468,85 @@ impl Recipe {
             },
         ]
     }
+
+    /// Mystic Forge material promotions (tier upgrades), verified against
+    /// https://wiki.guildwars2.com/wiki/Mystic_Forge (see the per-material
+    /// pages, e.g. Mystic Crystal/Material promotion recipes). Fixed-quantity
+    /// binding-agent variants only: 8/6/4/2 base -> x4/x3/x2/x1 output.
+    /// The wine variants are strictly dominated (same 2x base rate plus a
+    /// 2504c bottle of wine), so only the cheaper agent path is listed.
+    /// Probabilistic forge recipes (clovers, bulk promotions, lotteries)
+    /// are deliberately excluded: the profit math needs fixed outputs.
+    /// Mystic Crystals / Binding Agents are account-bound vendor goods
+    /// counted as free (see Item::token_value), like karma basics.
+    pub fn mystic_forge_recipes() -> Vec<Recipe> {
+        const CRYSTAL: u32 = 20799; // Mystic Crystal
+        const AGENT: u32 = 39125; // Mystic Binding Agent
+                                  // (output, base, dust, agent output count; agent input is
+                                  // 8/6/4/2x base for x4/x3/x2/x1 outputs respectively)
+        const RADIANT: u32 = 24274;
+        const LUMINOUS: u32 = 24275;
+        const INCANDESCENT: u32 = 24276;
+        const CRYSTALLINE: u32 = 24277;
+        let steps: &[(u32, u32, u32, u32, u32)] = &[
+            (24302, 24301, RADIANT, 8, 4),      // Charged Fragment x4
+            (24303, 24302, LUMINOUS, 6, 3),     // Charged Shard x3
+            (24304, 24303, INCANDESCENT, 4, 2), // Charged Core x2
+            (24305, 24304, CRYSTALLINE, 2, 1),  // Charged Lodestone x1
+            (24337, 24336, RADIANT, 8, 4),      // Corrupted Fragment x4
+            (24338, 24337, LUMINOUS, 6, 3),     // Corrupted Shard x3
+            (24339, 24338, INCANDESCENT, 4, 2), // Corrupted Core x2
+            (24340, 24339, CRYSTALLINE, 2, 1),  // Corrupted Lodestone x1
+            (24327, 24326, RADIANT, 8, 4),      // Crystal Fragment x4
+            (24328, 24327, LUMINOUS, 6, 3),     // Crystal Shard x3
+            (24329, 24328, INCANDESCENT, 4, 2), // Crystal Core x2
+            (24330, 24329, CRYSTALLINE, 2, 1),  // Crystal Lodestone x1
+            (24322, 24321, RADIANT, 8, 4),      // Destroyer Fragment x4
+            (24323, 24322, LUMINOUS, 6, 3),     // Destroyer Shard x3
+            (24324, 24323, INCANDESCENT, 4, 2), // Destroyer Core x2
+            (24325, 24324, CRYSTALLINE, 2, 1),  // Destroyer Lodestone x1
+            (24317, 24316, RADIANT, 8, 4),      // Glacial Fragment x4
+            (24318, 24317, LUMINOUS, 6, 3),     // Glacial Shard x3
+            (24319, 24318, INCANDESCENT, 4, 2), // Glacial Core x2
+            (24320, 24319, CRYSTALLINE, 2, 1),  // Glacial Lodestone x1
+            (24312, 24311, RADIANT, 8, 4),      // Molten Fragment x4
+            (24313, 24312, LUMINOUS, 6, 3),     // Molten Shard x3
+            (24314, 24313, INCANDESCENT, 4, 2), // Molten Core x2
+            (24315, 24314, CRYSTALLINE, 2, 1),  // Molten Lodestone x1
+            (24307, 24306, RADIANT, 8, 4),      // Onyx Fragment x4
+            (24308, 24307, LUMINOUS, 6, 3),     // Onyx Shard x3
+            (24309, 24308, INCANDESCENT, 4, 2), // Onyx Core x2
+            (24310, 24309, CRYSTALLINE, 2, 1),  // Onyx Lodestone x1
+        ];
+        steps
+            .iter()
+            .map(|&(output, base, dust, agent_n, agent_out)| Recipe {
+                id: None,
+                output_item_id: output,
+                output_item_count: agent_out,
+                disciplines: vec![config::Discipline::MysticForge],
+                ingredients: vec![
+                    api::RecipeIngredient {
+                        item_id: base,
+                        count: agent_n,
+                    },
+                    api::RecipeIngredient {
+                        item_id: AGENT,
+                        count: 1,
+                    },
+                    api::RecipeIngredient {
+                        item_id: dust,
+                        count: 1,
+                    },
+                    api::RecipeIngredient {
+                        item_id: CRYSTAL,
+                        count: 1,
+                    },
+                ],
+                source: RecipeSource::Automatic,
+            })
+            .collect()
+    }
 }
 
 pub fn mark_recursive_recipes(recipes_map: &HashMap<u32, Recipe>) -> HashSet<u32> {
@@ -514,5 +593,43 @@ fn mark_recursive_recipes_internal(
             );
             ingredients_stack.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn mystic_forge_recipes_shape() {
+        let recipes = Recipe::mystic_forge_recipes();
+        // 7 families x (fragment, shard, core, lodestone) x (wine excluded)
+        assert_eq!(recipes.len(), 28);
+        let mut outputs = HashSet::new();
+        for recipe in &recipes {
+            // all forge rows: no unlock tracking, MysticForge discipline
+            assert_eq!(recipe.id, None);
+            assert_eq!(recipe.disciplines, vec![config::Discipline::MysticForge]);
+            assert!(recipe.is_automatic());
+            // fixed agent-variant quantities only
+            assert!([4, 3, 2, 1].contains(&recipe.output_item_count));
+            assert_eq!(recipe.ingredients.len(), 4);
+            // binding agent + crystal legs on every row
+            let ids: Vec<u32> = recipe.ingredients.iter().map(|i| i.item_id).collect();
+            assert!(ids.contains(&39125)); // Mystic Binding Agent
+            assert!(ids.contains(&20799)); // Mystic Crystal
+            assert!(outputs.insert(recipe.output_item_id));
+        }
+        // spot-check: Glacial Shard x3 from 6 fragments
+        let shard = recipes
+            .iter()
+            .find(|r| r.output_item_id == 24318)
+            .expect("Glacial Shard promotion");
+        assert_eq!(shard.output_item_count, 3);
+        assert!(shard
+            .ingredients
+            .iter()
+            .any(|i| i.item_id == 24317 && i.count == 6));
     }
 }

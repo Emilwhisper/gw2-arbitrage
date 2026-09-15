@@ -1697,6 +1697,7 @@ impl App {
                 "Scribe",
                 "Homesteader",
                 "Achievement",
+                "Mystic Forge",
             ] {
                 let Some(discipline) = variant.parse::<config::Discipline>().ok() else {
                     continue;

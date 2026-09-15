@@ -268,6 +268,10 @@ impl Item {
             // LW1
             // 50025 Blade Shard
             50025 => Some(Money::from_copper(0)),
+            // Mystic Forge legs: account-bound vendor goods counted as free
+            // (like karma basics); enables Mystic Forge promotion recipes
+            20799 => Some(Money::from_copper(0)), // Mystic Crystal
+            39125 => Some(Money::from_copper(0)), // Mystic Binding Agent
             // 12339 Lime: unpack-only (Limes in Bulk costs 77 karma / 25).
             // Ungated like the other zero-cost entries so it is obtainable
             // without --karma; karma itself counts as free (see

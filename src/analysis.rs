@@ -95,6 +95,10 @@ pub async fn load_analysis(notify: Option<&dyn Fn(&str)>) -> Result<Analysis, Bo
         })
         .collect();
     recipes.append(&mut Recipe::additional_recipes());
+    // Mystic Forge promotions slot in where no station recipe exists (the
+    // official API has no forge rows, so these never collide in practice;
+    // recipes_map keeps the last insert on duplicates)
+    recipes.append(&mut Recipe::mystic_forge_recipes());
     let mut recipes_map = profit::vec_to_map(recipes, |x| x.output_item_id);
     let items_map = profit::vec_to_map(items, |x| x.id);
 
