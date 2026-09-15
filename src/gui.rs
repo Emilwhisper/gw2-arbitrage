@@ -242,6 +242,20 @@ fn threshold_label(threshold: i64) -> &'static str {
     }
 }
 
+/// URL slug for an item name: spaces become `separator` (`-` for
+/// gw2efficiency, `_` for the wiki), and only the characters that would break
+/// a URL path are percent-encoded (`#` would start a fragment, `?` a query).
+fn url_slug(name: &str, separator: char) -> String {
+    name.replace(' ', &separator.to_string())
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3F")
+}
+
+/// Wiki article slug for an item name (canonical underscore form).
+fn wiki_slug(name: &str) -> String {
+    url_slug(name, '_')
+}
 
 /// Bounds for the "Background worker threads" setting.
 const MIN_WORKER_THREADS: u32 = 1;
@@ -1852,27 +1866,24 @@ impl App {
             self.request_icon(ui.ctx(), item_id, icon_url);
         }
         ui.horizontal(|ui| {
-            let name_urlencoded = item.name.replace(' ', "%20");
+            // direct item links: the wiki resolves exact article names,
+            // gw2efficiency calculator pages are `{id}-{slug}` (resolved by
+            // id), and gw2bltc resolves a bare item id
             ui.hyperlink_to(
                 "Wiki",
-                format!(
-                    "https://wiki.guildwars2.com/wiki/Special:Search?search={}",
-                    name_urlencoded
-                ),
+                format!("https://wiki.guildwars2.com/wiki/{}", wiki_slug(&item.name)),
             );
             ui.hyperlink_to(
                 "gw2efficiency",
                 format!(
-                    "https://gw2efficiency.com/crafting/calculator/#g=1&q={}",
-                    name_urlencoded
+                    "https://gw2efficiency.com/crafting/calculator/{}-{}",
+                    item_id,
+                    url_slug(&item.name, '-')
                 ),
             );
             ui.hyperlink_to(
                 "gw2bltc",
-                format!(
-                    "https://www.gw2bltc.com/en/tp/search?q={}&p=item",
-                    name_urlencoded
-                ),
+                format!("https://www.gw2bltc.com/en/item/{}", item_id),
             );
         });
 
@@ -2058,5 +2069,26 @@ impl App {
         if refresh_requested {
             self.request_item_detail(item_id, true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{threshold_label, url_slug, wiki_slug, WIDE_1G_COPPER};
+
+    #[test]
+    fn slug_helpers() {
+        assert_eq!(
+            url_slug("Bowl of Prickly Pear Sorbet", '-'),
+            "Bowl-of-Prickly-Pear-Sorbet"
+        );
+        assert_eq!(
+            wiki_slug("Bowl of Prickly Pear Sorbet"),
+            "Bowl_of_Prickly_Pear_Sorbet"
+        );
+        // characters that would break the URL path get encoded
+        assert_eq!(url_slug("A #1? 100%", '-'), "A-%231%3F-100%25");
+        assert_eq!(threshold_label(WIDE_1G_COPPER), "profit > -1g");
+        assert_eq!(threshold_label(0), "profitable");
     }
 }
