@@ -41,7 +41,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 ## Phase 4 — Windows polish
 - [ ] `cargo build --release` on Windows; produce a portable zip (single `.exe`) and/or an installer (e.g. Inno Setup / NSIS).
 - [ ] App icon, window icon, high-DPI support.
-- [ ] Rarity colors (Junk grey → Legendary orange) for names/icons.
+- [x] Rarity colors (Junk grey → Legendary orange) for names in the list and detail window.
 - [x] Remember GUI settings (filters: sort order, favorites-only, discipline selections) — persisted to `gui_prefs.json` in the cache dir.
 - [x] Settings window: GW2 API key editing, saved to the existing TOML config file (`gw2-arbitrage.toml`).
 - [ ] Friendly error dialogs (no internet, API key rejected, cache corrupt → suggest reset).

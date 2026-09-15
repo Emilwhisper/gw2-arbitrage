@@ -19,7 +19,7 @@ use crate::config;
 use crate::crafting;
 use crate::favorites;
 use crate::icons;
-use crate::item::Item;
+use crate::item::{Item, Rarity};
 use crate::money::Money;
 use crate::profit::ProfitableItem;
 use crate::recipe::Recipe;
@@ -432,6 +432,20 @@ impl App {
 }
 
 
+/// GW2 rarity colors.
+fn rarity_color(rarity: &Rarity) -> egui::Color32 {
+    match rarity {
+        Rarity::Junk => egui::Color32::from_rgb(0xAA, 0xAA, 0xAA),
+        Rarity::Basic => egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        Rarity::Fine => egui::Color32::from_rgb(0x62, 0xA4, 0xDA),
+        Rarity::Masterwork => egui::Color32::from_rgb(0x33, 0xCC, 0x33),
+        Rarity::Rare => egui::Color32::from_rgb(0xF6, 0xD6, 0x4A),
+        Rarity::Exotic => egui::Color32::from_rgb(0xBA, 0x5C, 0xFF),
+        Rarity::Ascended => egui::Color32::from_rgb(0xFB, 0x3E, 0x8D),
+        Rarity::Legendary => egui::Color32::from_rgb(0xFF, 0x84, 0x00),
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
@@ -649,6 +663,11 @@ impl App {
                             .items_map
                             .get(&item.id)
                             .map_or_else(|| "???".to_string(), |i| i.to_string());
+                        let name_color = analysis
+                            .items_map
+                            .get(&item.id)
+                            .map(|i| rarity_color(i.rarity()))
+                            .unwrap_or(egui::Color32::PLACEHOLDER);
                         let disciplines = analysis
                             .recipes_map
                             .get(&item.id)
@@ -663,7 +682,7 @@ impl App {
                         if ui
                             .selectable_label(
                                 detail_item_id == Some(item.id),
-                                format!("{:<50}", name),
+                                egui::RichText::new(format!("{:<50}", name)).color(name_color),
                             )
                             .clicked()
                         {
@@ -708,12 +727,13 @@ impl App {
         };
         let icon_url = item.icon.clone();
         let item_name = item.to_string();
+        let name_color = rarity_color(item.rarity());
         let is_favorite = self.favorites.contains(&item_id);
         ui.horizontal(|ui| {
             if let Some(tex) = self.icon_textures.get(&item_id).and_then(|t| t.as_ref()) {
                 ui.image((tex.id(), egui::vec2(32.0, 32.0)));
             }
-            ui.heading(&item_name);
+            ui.heading(egui::RichText::new(&item_name).color(name_color));
             if ui
                 .selectable_label(is_favorite, if is_favorite { "★" } else { "☆" })
                 .clicked()

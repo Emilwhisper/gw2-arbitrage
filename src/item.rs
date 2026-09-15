@@ -28,6 +28,13 @@ pub struct Item {
     details: Option<Details>,
 }
 
+impl Item {
+    /// The item's rarity, for GUI display purposes.
+    pub fn rarity(&self) -> &Rarity {
+        &self.rarity
+    }
+}
+
 impl From<ApiItem> for Item {
     fn from(item: ApiItem) -> Self {
         let details = match (&item.item_type, item.details) {
