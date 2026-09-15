@@ -141,7 +141,7 @@ impl App {
         });
     }
 
-    fn request_item_detail(&mut self, item_id: u32) {
+    fn request_item_detail(&mut self, item_id: u32, refresh: bool) {
         let analysis = match &self.analysis {
             Some(a) => Arc::clone(a),
             None => return,
@@ -153,7 +153,8 @@ impl App {
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            let result = runtime.block_on(analysis::run_item_analysis(&analysis, item_id, None));
+            let result =
+                runtime.block_on(analysis::run_item_analysis(&analysis, item_id, None, refresh));
             match result {
                 Ok(data) => {
                     let _ = tx.send(Event::ItemDone(item_id, data.0, data.1, data.2, data.3));
@@ -543,7 +544,7 @@ impl App {
         });
 
         if let Some(item_id) = clicked {
-            self.request_item_detail(item_id);
+            self.request_item_detail(item_id, false);
         }
         if let Some(item_id) = favorite_toggled {
             self.toggle_favorite(item_id);
@@ -661,6 +662,16 @@ impl App {
         }
 
         ui.separator();
+        let mut refresh_requested = false;
+        ui.horizontal(|ui| {
+            if ui.button("Refresh prices").clicked() {
+                refresh_requested = true;
+            }
+            if self.detail_loading {
+                ui.spinner();
+            }
+        });
+
         ui.strong("Shopping list");
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("shopping_grid")
@@ -687,5 +698,11 @@ impl App {
                     }
                 });
         });
+
+        if refresh_requested {
+            self.request_item_detail(item_id, true);
+        }
     }
 }
+
+

@@ -122,6 +122,8 @@ pub async fn calc_item_profit(
     items_map: &HashMap<u32, Item>,
     known_recipes: &Option<HashSet<u32>>,
     notify: Option<&dyn Fn(&str)>,
+    // when true, bypass the listings cache and fetch fresh prices
+    refresh: bool,
 ) -> Result<
     (
         Option<ProfitableItem>,
@@ -167,8 +169,13 @@ pub async fn calc_item_profit(
     request_listing_item_ids.sort_unstable();
     request_listing_item_ids.dedup();
 
+    let listings_cache_dir: Option<&std::path::PathBuf> = if refresh {
+        None
+    } else {
+        Some(&CONFIG.cache_dir)
+    };
     let tp_listings =
-        request::fetch_item_listings(&request_listing_item_ids, Some(&CONFIG.cache_dir), notify)
+        request::fetch_item_listings(&request_listing_item_ids, listings_cache_dir, notify)
             .await?;
     let tp_listings_map = vec_to_map(tp_listings, |x| x.id);
 

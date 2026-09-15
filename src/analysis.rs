@@ -150,10 +150,12 @@ pub async fn run_list_analysis(
 }
 
 /// Single-item analysis: shopping list data for one item id.
+/// When `refresh` is true, bypasses the listings cache for fresh prices.
 pub async fn run_item_analysis(
     analysis: &Analysis,
     item_id: u32,
     notify: Option<&dyn Fn(&str)>,
+    refresh: bool,
 ) -> Result<
     (
         Option<profit::ProfitableItem>,
@@ -169,6 +171,7 @@ pub async fn run_item_analysis(
         &analysis.items_map,
         &analysis.known_recipes,
         notify,
+        refresh,
     )
     .await
 }
