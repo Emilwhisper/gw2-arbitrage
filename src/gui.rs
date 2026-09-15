@@ -551,6 +551,34 @@ impl App {
         }
     }
 
+    /// Fetch sell velocity for a single item (used when the detail window is
+    /// opened before the background workers reached that item).
+    fn request_item_velocity(&mut self, item_id: u32) {
+        if self.velocities_requested.contains(&item_id) {
+            return;
+        }
+        let need_hourly = VELOCITY_COLUMNS[..3]
+            .iter()
+            .any(|(c, _, _)| self.velocity_enabled(*c));
+        let need_daily = VELOCITY_COLUMNS[3..]
+            .iter()
+            .any(|(c, _, _)| self.velocity_enabled(*c));
+        let hourly = need_hourly && !self.velocity_hourly_done.contains(&item_id);
+        let daily = need_daily && !self.velocity_daily_done.contains(&item_id);
+        if !hourly && !daily {
+            return;
+        }
+        self.velocities_requested.insert(item_id);
+        let tx = self.events_sender.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            let v = runtime
+                .block_on(velocity::fetch_velocity(item_id, hourly, daily))
+                .ok();
+            let _ = tx.send(Event::VelocityLoaded(item_id, v, hourly, daily));
+        });
+    }
+
     fn export_csv(&mut self) {
         let analysis = match self.analysis.clone() {
             Some(a) => a,
@@ -1267,6 +1295,37 @@ impl App {
                 format!("https://www.gw2bltc.com/en/tp/search?q={}&p=item", name_urlencoded),
             );
         });
+
+        // sell velocity (units/day) for the enabled windows
+        let velocity_windows: Vec<(&str, fn(&velocity::Velocity) -> Option<f64>)> = VELOCITY_COLUMNS
+            .iter()
+            .filter(|(c, _, _)| self.velocity_enabled(*c))
+            .map(|(_, label, accessor)| (*label, *accessor))
+            .collect();
+        if !velocity_windows.is_empty() {
+            ui.separator();
+            ui.strong("Sell velocity (units/day)");
+            match self.velocities.get(&item_id).copied() {
+                Some(v) => {
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, accessor) in &velocity_windows {
+                            let text = match accessor(&v) {
+                                Some(x) => format!("{}: {:.1}", label, x),
+                                None => format!("{}: \u{2013}", label),
+                            };
+                            ui.label(text);
+                        }
+                    });
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Fetching sell history\u{2026}");
+                    });
+                    self.request_item_velocity(item_id);
+                }
+            }
+        }
         ui.separator();
 
         if self.detail_loading {
