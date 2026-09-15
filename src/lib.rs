@@ -11,3 +11,4 @@ pub mod money;
 pub mod profit;
 pub mod recipe;
 pub mod request;
+pub mod velocity;

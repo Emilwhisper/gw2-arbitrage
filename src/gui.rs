@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 use egui::TextureHandle;
 
 use crate::analysis::{self, Analysis};
@@ -23,6 +24,7 @@ use crate::item::{Item, Rarity};
 use crate::money::Money;
 use crate::profit::ProfitableItem;
 use crate::recipe::Recipe;
+use crate::velocity;
 
 enum Event {
     Progress(String),
@@ -37,7 +39,66 @@ enum Event {
     ),
     ItemError(u32, String),
     IconLoaded(u32, Option<PathBuf>),
+    VelocityLoaded(u32, Option<velocity::Velocity>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortColumn {
+    Name,
+    Disciplines,
+    ItemId,
+    TotalProfit,
+    ProfitPerItem,
+    ProfitPerStep,
+    Vel6h,
+    Vel12h,
+    Vel24h,
+    Vel7d,
+    Vel2w,
+    Vel1m,
+    Vel3m,
+}
+
+impl SortColumn {
+    /// Default direction when a column is first clicked.
+    fn default_desc(self) -> bool {
+        !matches!(self, SortColumn::Name | SortColumn::Disciplines)
+    }
+
+    fn header(self) -> &'static str {
+        match self {
+            SortColumn::Name => "Name",
+            SortColumn::Disciplines => "Disciplines",
+            SortColumn::ItemId => "Item ID",
+            SortColumn::TotalProfit => "Total profit",
+            SortColumn::ProfitPerItem => "Profit / item",
+            SortColumn::ProfitPerStep => "Profit / step",
+            SortColumn::Vel6h => "Vel 6h",
+            SortColumn::Vel12h => "Vel 12h",
+            SortColumn::Vel24h => "Vel 24h",
+            SortColumn::Vel7d => "Vel 7d",
+            SortColumn::Vel2w => "Vel 2w",
+            SortColumn::Vel1m => "Vel 1m",
+            SortColumn::Vel3m => "Vel 3m",
+        }
+    }
+}
+
+const ALL_SORT_COLUMNS: [SortColumn; 13] = [
+    SortColumn::Name,
+    SortColumn::Disciplines,
+    SortColumn::ItemId,
+    SortColumn::TotalProfit,
+    SortColumn::ProfitPerItem,
+    SortColumn::ProfitPerStep,
+    SortColumn::Vel6h,
+    SortColumn::Vel12h,
+    SortColumn::Vel24h,
+    SortColumn::Vel7d,
+    SortColumn::Vel2w,
+    SortColumn::Vel1m,
+    SortColumn::Vel3m,
+];
 
 pub fn run() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
@@ -67,6 +128,10 @@ struct App {
     favorites_dirty: bool,
     icon_textures: HashMap<u32, Option<TextureHandle>>,
     pending_icons: HashSet<u32>,
+    velocities: HashMap<u32, velocity::Velocity>,
+    velocities_requested: HashSet<u32>,
+    sort_column: SortColumn,
+    sort_desc: bool,
     detail_item_id: Option<u32>,
     detail_open: bool,
     detail_loading: bool,
@@ -124,6 +189,10 @@ impl App {
             favorites_dirty: false,
             icon_textures: HashMap::new(),
             pending_icons: HashSet::new(),
+            velocities: HashMap::new(),
+            velocities_requested: HashSet::new(),
+            sort_column: SortColumn::TotalProfit,
+            sort_desc: true,
             detail_item_id: None,
             detail_open: false,
             detail_loading: false,
@@ -307,6 +376,42 @@ impl App {
         };
     }
 
+    /// Kick off background workers that fetch sell-velocity data for every
+    /// profitable item from datawars2.ie (one request per item; the API does
+    /// not support multi-ID requests).
+    fn spawn_velocity_workers(&mut self) {
+        let ids: Vec<u32> = self
+            .profitable_items
+            .iter()
+            .filter(|i| i.count > 0 && !self.velocities.contains_key(&i.id))
+            .map(|i| i.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.velocities_requested
+            .extend(ids.iter().copied());
+        let queue = Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::from(ids),
+        ));
+        for _ in 0..4 {
+            let tx = self.events_sender.clone();
+            let queue = Arc::clone(&queue);
+            thread::spawn(move || {
+                let runtime =
+                    tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                loop {
+                    let id = queue.lock().expect("queue poisoned").pop_front();
+                    let Some(id) = id else { break };
+                    let v = runtime
+                        .block_on(velocity::fetch_velocity(id))
+                        .ok();
+                    let _ = tx.send(Event::VelocityLoaded(id, v));
+                }
+            });
+        }
+    }
+
     fn export_csv(&mut self) {
         let analysis = match self.analysis.clone() {
             Some(a) => a,
@@ -406,6 +511,7 @@ impl App {
                     self.running = false;
                     self.status =
                         format!("Done: {} profitable items", self.profitable_items.len());
+                    self.spawn_velocity_workers();
                 }
                 Event::AnalysisError(e) => {
                     self.running = false;
@@ -425,6 +531,12 @@ impl App {
                 }
                 Event::IconLoaded(item_id, path) => {
                     self.load_icon_texture(ctx, item_id, path);
+                }
+                Event::VelocityLoaded(item_id, v) => {
+                    self.velocities_requested.remove(&item_id);
+                    if let Some(v) = v {
+                        self.velocities.insert(item_id, v);
+                    }
                 }
             }
         }
@@ -453,7 +565,7 @@ impl eframe::App for App {
         self.flush_prefs();
 
         // keep repainting while background work is running
-        if self.running || self.detail_loading || !self.pending_icons.is_empty() {
+        if self.running || self.detail_loading || !self.pending_icons.is_empty() || !self.velocities_requested.is_empty() {
             ctx.request_repaint();
         }
 
@@ -544,12 +656,9 @@ impl App {
     fn show_item_list(&mut self, ui: &mut egui::Ui, analysis: &Analysis) {
         // filters
         ui.horizontal(|ui| {
-            let mut sort_desc = self.sort_by_profit_desc;
             let mut favs_only = self.favorites_only;
-            ui.checkbox(&mut sort_desc, "Sort by profit (high → low)");
             ui.checkbox(&mut favs_only, "★ only");
-            if sort_desc != self.sort_by_profit_desc || favs_only != self.favorites_only {
-                self.sort_by_profit_desc = sort_desc;
+            if favs_only != self.favorites_only {
                 self.favorites_only = favs_only;
                 self.prefs_dirty = true;
             }
@@ -579,10 +688,20 @@ impl App {
                     self.prefs_dirty = true;
                 }
             }
+            ui.separator();
+            if !self.velocities_requested.is_empty() {
+                ui.spinner();
+                ui.label(format!("loading velocity ({}/{})…", self.velocities.len(), self.velocities.len() + self.velocities_requested.len()));
+            }
         });
         ui.separator();
 
         // Precompute everything the UI closure needs so it doesn't borrow `self`.
+        let favorites = self.favorites.clone();
+        let detail_item_id = self.detail_item_id;
+        let sort_column = self.sort_column;
+        let sort_desc = self.sort_desc;
+        let velocities = self.velocities.clone();
         let mut items: Vec<&ProfitableItem> = self
             .profitable_items
             .iter()
@@ -593,16 +712,71 @@ impl App {
                         r.disciplines.iter().any(|d| self.discipline_filter.contains(d))
                     })
             })
+            .filter(|i| i.count > 0)
             .collect();
-        if self.sort_by_profit_desc {
-            items.sort_by_key(|i| {
-                (!self.favorites.contains(&i.id), -i.profit.to_copper_value())
-            });
-        } else {
-            items.sort_by_key(|i| !self.favorites.contains(&i.id));
-        }
-        let favorites = self.favorites.clone();
-        let detail_item_id = self.detail_item_id;
+
+        let item_info =
+            |analysis: &Analysis, id: u32| -> (String, String) {
+                let name = analysis
+                    .items_map
+                    .get(&id)
+                    .map_or_else(|| "???".to_string(), |i| i.to_string());
+                let disciplines = analysis
+                    .recipes_map
+                    .get(&id)
+                    .map(|r: &Recipe| {
+                        r.disciplines
+                            .iter()
+                            .map(|d| d.get_abbrev())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .unwrap_or_default();
+                (name, disciplines)
+            };
+
+        let sort_key = |i: &ProfitableItem| -> (f64, String) {
+            let (name, disciplines) = item_info(analysis, i.id);
+            match sort_column {
+                SortColumn::Name => (0.0, name.to_lowercase()),
+                SortColumn::Disciplines => (0.0, disciplines),
+                SortColumn::ItemId => (i.id as f64, String::new()),
+                SortColumn::TotalProfit => (i.profit.to_copper_value() as f64, String::new()),
+                SortColumn::ProfitPerItem => {
+                    (i.profit_per_item().to_copper_value() as f64, String::new())
+                }
+                SortColumn::ProfitPerStep => (
+                    i.profit_per_crafting_step().to_copper_value() as f64,
+                    String::new(),
+                ),
+                SortColumn::Vel6h => (velocities.get(&i.id).and_then(|v| v.h6).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel12h => (velocities.get(&i.id).and_then(|v| v.h12).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel24h => (velocities.get(&i.id).and_then(|v| v.h24).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel7d => (velocities.get(&i.id).and_then(|v| v.d7).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel2w => (velocities.get(&i.id).and_then(|v| v.w2).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel1m => (velocities.get(&i.id).and_then(|v| v.m1).unwrap_or(f64::NEG_INFINITY), String::new()),
+                SortColumn::Vel3m => (velocities.get(&i.id).and_then(|v| v.m3).unwrap_or(f64::NEG_INFINITY), String::new()),
+            }
+        };
+
+        items.sort_by(|a, b| {
+            // favorites are always pinned to the top
+            let fav = (!favorites.contains(&a.id)).cmp(&(!favorites.contains(&b.id)));
+            let ka = sort_key(a);
+            let kb = sort_key(b);
+            let value = ka
+                .0
+                .partial_cmp(&kb.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(ka.1.cmp(&kb.1));
+            let value = if sort_desc {
+                value.reverse()
+            } else {
+                value
+            };
+            fav.then(value)
+        });
+
         // texture ids are cheap to copy; None marks "failed to load"
         let icon_ids: HashMap<u32, Option<egui::TextureId>> = self
             .icon_textures
@@ -618,26 +792,62 @@ impl App {
         let mut clicked: Option<u32> = None;
         let mut favorite_toggled: Option<u32> = None;
         let mut icons_requested: Vec<u32> = vec![];
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("item_grid")
-                .striped(true)
-                .num_columns(8)
-                .show(ui, |ui| {
+        let mut sort_changed: Option<(SortColumn, bool)> = None;
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::remainder())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .header(26.0, |mut header| {
+                header.col(|ui| {
                     ui.strong("Icon");
-                    ui.strong("★");
-                    ui.strong("Name");
-                    ui.strong("Disciplines");
-                    ui.strong("Item ID");
-                    ui.strong("Total profit");
-                    ui.strong("Profit / item");
-                    ui.strong("Profit / step");
-                    ui.end_row();
-                    for item in &items {
-                        if item.count == 0 {
-                            continue;
+                });
+                header.col(|ui| {
+                    ui.strong("\u{2605}");
+                });
+                for col in ALL_SORT_COLUMNS {
+                    header.col(|ui| {
+                        let is_active = sort_column == col;
+                        let arrow = if is_active {
+                            if sort_desc { " \u{25bc}" } else { " \u{25b2}" }
+                        } else {
+                            ""
+                        };
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{}{}", col.header(), arrow)).strong(),
+                            )
+                            .clicked()
+                        {
+                            let new_desc = if is_active {
+                                !sort_desc
+                            } else {
+                                col.default_desc()
+                            };
+                            sort_changed = Some((col, new_desc));
                         }
+                    });
+                }
+            })
+            .body(|mut body| {
+                for item in &items {
+                    body.row(28.0, |mut row| {
                         // icon (lazy download + cache)
-                        match icon_ids.get(&item.id) {
+                        row.col(|ui| match icon_ids.get(&item.id) {
                             Some(Some(tex_id)) => {
                                 ui.image((*tex_id, egui::vec2(24.0, 24.0)));
                             }
@@ -648,56 +858,85 @@ impl App {
                                 ui.label("");
                                 icons_requested.push(item.id);
                             }
-                        }
+                        });
                         // favorite star
-                        let is_favorite = favorites.contains(&item.id);
-                        if ui
-                            .selectable_label(
-                                is_favorite,
-                                if is_favorite { "★" } else { "☆" },
-                            )
-                            .clicked()
-                        {
-                            favorite_toggled = Some(item.id);
-                        }
-                        let name = analysis
-                            .items_map
-                            .get(&item.id)
-                            .map_or_else(|| "???".to_string(), |i| i.to_string());
+                        row.col(|ui| {
+                            let is_favorite = favorites.contains(&item.id);
+                            if ui
+                                .selectable_label(
+                                    is_favorite,
+                                    if is_favorite { "\u{2605}" } else { "\u{2606}" },
+                                )
+                                .clicked()
+                            {
+                                favorite_toggled = Some(item.id);
+                            }
+                        });
+                        let (name, disciplines) = item_info(analysis, item.id);
                         let name_color = analysis
                             .items_map
                             .get(&item.id)
                             .map(|i| rarity_color(i.rarity()))
                             .unwrap_or(egui::Color32::PLACEHOLDER);
-                        let disciplines = analysis
-                            .recipes_map
-                            .get(&item.id)
-                            .map(|r: &Recipe| {
-                                r.disciplines
-                                    .iter()
-                                    .map(|d| d.get_abbrev())
-                                    .collect::<Vec<_>>()
-                                    .join("/")
-                            })
-                            .unwrap_or_default();
-                        if ui
-                            .selectable_label(
-                                detail_item_id == Some(item.id),
-                                egui::RichText::new(format!("{:<50}", name)).color(name_color),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(item.id);
+                        row.col(|ui| {
+                            if ui
+                                .selectable_label(
+                                    detail_item_id == Some(item.id),
+                                    egui::RichText::new(name).color(name_color),
+                                )
+                                .clicked()
+                            {
+                                clicked = Some(item.id);
+                            }
+                        });
+                        row.col(|ui| {
+                            ui.label(disciplines);
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{}", item.id));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{}", item.profit));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{}", item.profit_per_item()));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{}", item.profit_per_crafting_step()));
+                        });
+                        // velocity columns (units/day); "\u{2026}" = loading, "\u{2013}" = no data
+                        let v = velocities.get(&item.id);
+                        let loading = !velocities.contains_key(&item.id);
+                        for value in [
+                            v.and_then(|v| v.h6),
+                            v.and_then(|v| v.h12),
+                            v.and_then(|v| v.h24),
+                            v.and_then(|v| v.d7),
+                            v.and_then(|v| v.w2),
+                            v.and_then(|v| v.m1),
+                            v.and_then(|v| v.m3),
+                        ] {
+                            row.col(|ui| match value {
+                                Some(x) => {
+                                    ui.label(format!("{:.1}", x));
+                                }
+                                None if loading => {
+                                    ui.label("\u{2026}");
+                                }
+                                None => {
+                                    ui.label("\u{2013}");
+                                }
+                            });
                         }
-                        ui.label(disciplines);
-                        ui.label(format!("{}", item.id));
-                        ui.label(format!("{}", item.profit));
-                        ui.label(format!("{}", item.profit_per_item()));
-                        ui.label(format!("{}", item.profit_per_crafting_step()));
-                        ui.end_row();
-                    }
-                });
-        });
+                    });
+                }
+            });
+
+        if let Some((col, desc)) = sort_changed {
+            self.sort_column = col;
+            self.sort_desc = desc;
+        }
+
 
         if let Some(item_id) = clicked {
             self.request_item_detail(item_id, false);
