@@ -15,6 +15,7 @@ use egui::TextureHandle;
 
 use crate::analysis::{self, Analysis};
 use crate::api;
+use crate::config;
 use crate::crafting;
 use crate::favorites;
 use crate::icons;
@@ -60,6 +61,8 @@ struct App {
     running: bool,
     status: String,
     sort_by_profit_desc: bool,
+    favorites_only: bool,
+    discipline_filter: Vec<config::Discipline>,
     favorites: HashSet<u32>,
     favorites_dirty: bool,
     icon_textures: HashMap<u32, Option<TextureHandle>>,
@@ -89,6 +92,8 @@ impl App {
             status: "Ready. Click 'Run analysis' to fetch databases and compute profitable items."
                 .to_string(),
             sort_by_profit_desc: true,
+            favorites_only: false,
+            discipline_filter: vec![],
             favorites: favorites::load(),
             favorites_dirty: false,
             icon_textures: HashMap::new(),
@@ -293,15 +298,49 @@ impl eframe::App for App {
 
 impl App {
     fn show_item_list(&mut self, ui: &mut egui::Ui, analysis: &Analysis) {
+        // filters
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.sort_by_profit_desc, "Sort by profit (high → low)");
+            ui.checkbox(&mut self.favorites_only, "★ only");
             ui.separator();
-            ui.label(format!("{} items", self.profitable_items.len()));
+            ui.label("Disciplines:");
+            for variant in [
+                "Artificer",
+                "Armorsmith",
+                "Chef",
+                "Huntsman",
+                "Jeweler",
+                "Leatherworker",
+                "Tailor",
+                "Weaponsmith",
+                "Scribe",
+                "Achievement",
+            ] {
+                let Some(discipline) = variant.parse::<config::Discipline>().ok() else { continue };
+                let mut checked = self.discipline_filter.contains(&discipline);
+                if ui.checkbox(&mut checked, variant).changed() {
+                    if checked {
+                        self.discipline_filter.push(discipline);
+                    } else {
+                        self.discipline_filter.retain(|d| *d != discipline);
+                    }
+                }
+            }
         });
         ui.separator();
 
         // Precompute everything the UI closure needs so it doesn't borrow `self`.
-        let mut items: Vec<&ProfitableItem> = self.profitable_items.iter().collect();
+        let mut items: Vec<&ProfitableItem> = self
+            .profitable_items
+            .iter()
+            .filter(|i| !self.favorites_only || self.favorites.contains(&i.id))
+            .filter(|i| {
+                self.discipline_filter.is_empty()
+                    || analysis.recipes_map.get(&i.id).is_some_and(|r| {
+                        r.disciplines.iter().any(|d| self.discipline_filter.contains(d))
+                    })
+            })
+            .collect();
         if self.sort_by_profit_desc {
             items.sort_by_key(|i| {
                 (!self.favorites.contains(&i.id), -i.profit.to_copper_value())
@@ -415,8 +454,8 @@ impl App {
     }
 
     fn show_item_detail(&mut self, ui: &mut egui::Ui, item_id: u32) {
-        let analysis = match &self.analysis {
-            Some(a) => a,
+        let analysis: Arc<Analysis> = match &self.analysis {
+            Some(a) => Arc::clone(a),
             None => {
                 ui.label("No analysis loaded");
                 return;
@@ -429,7 +468,34 @@ impl App {
                 return;
             }
         };
-        ui.heading(item.to_string());
+        ui.horizontal(|ui| {
+            ui.heading(item.to_string());
+            let is_favorite = self.favorites.contains(&item_id);
+            if ui
+                .selectable_label(is_favorite, if is_favorite { "★" } else { "☆" })
+                .clicked()
+            {
+                self.toggle_favorite(item_id);
+            }
+        });
+        ui.horizontal(|ui| {
+            let name_urlencoded = item.name.replace(' ', "%20");
+            ui.hyperlink_to(
+                "Wiki",
+                format!("https://wiki.guildwars2.com/wiki/Special:Search?search={}", name_urlencoded),
+            );
+            ui.hyperlink_to(
+                "gw2efficiency",
+                format!(
+                    "https://gw2efficiency.com/crafting/calculator/#g=1&q={}",
+                    name_urlencoded
+                ),
+            );
+            ui.hyperlink_to(
+                "gw2bltc",
+                format!("https://www.gw2bltc.com/en/tp/search?q={}&p=item", name_urlencoded),
+            );
+        });
         ui.separator();
 
         if self.detail_loading {
