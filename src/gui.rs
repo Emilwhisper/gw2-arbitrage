@@ -186,6 +186,14 @@ struct App {
     detail_loading: bool,
     detail: Option<DetailData>,
     show_settings: bool,
+    show_filters: bool,
+    /// Draft values edited in the Filters window (persisted on Apply).
+    filter_draft: FilterValues,
+    /// Values actually applied to the list (copied from drafts on Apply;
+    /// empty on boot until the user clicks Apply).
+    filter_applied: FilterValues,
+    /// Last persisted values (drafts revert here on Close without Apply).
+    filter_saved: FilterValues,
     api_key_input: String,
     /// `--count` runtime setting (limit items produced per recipe)
     count_limit_enabled: bool,
@@ -205,6 +213,40 @@ const DEFAULT_WORKER_THREADS: u32 = 4;
 /// so past this point the server (not the client) is the bottleneck.
 const MAX_WORKER_THREADS: u32 = 16;
 
+/// Extra list filters edited in the Filters window.
+///
+/// `min_velocity` is compared against the selected `velocity_window` (a
+/// `VELOCITY_COLUMNS` id such as `"24h"`); `min_profit_pct` against
+/// `profit_on_cost() * 100.0`; `min_profit_copper` against total profit in
+/// copper. `None` means that threshold is inactive.
+#[derive(Debug, Clone)]
+struct FilterValues {
+    min_velocity: Option<f64>,
+    velocity_window: String,
+    min_profit_pct: Option<f64>,
+    min_profit_copper: Option<i32>,
+}
+
+impl Default for FilterValues {
+    fn default() -> Self {
+        Self {
+            min_velocity: None,
+            velocity_window: "24h".to_string(),
+            min_profit_pct: None,
+            min_profit_copper: None,
+        }
+    }
+}
+
+/// Serde mirror of `FilterValues` for `gui_prefs.json`.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct ExtraFiltersPrefs {
+    min_velocity: Option<f64>,
+    velocity_window: Option<String>,
+    min_profit_pct: Option<f64>,
+    min_profit_copper: Option<i32>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct GuiPrefs {
     sort_by_profit_desc: Option<bool>,
@@ -212,6 +254,7 @@ struct GuiPrefs {
     disciplines: Option<Vec<String>>,
     velocity_windows: Option<Vec<String>>,
     worker_threads: Option<u32>,
+    extra_filters: Option<ExtraFiltersPrefs>,
 }
 
 const GUI_PREFS_FILE: &str = "gui_prefs.json";
@@ -269,6 +312,10 @@ impl App {
             detail_loading: false,
             detail: None,
             show_settings: false,
+            show_filters: false,
+            filter_draft: FilterValues::default(),
+            filter_applied: FilterValues::default(),
+            filter_saved: FilterValues::default(),
             api_key_input: crate::config::CONFIG.api_key.clone().unwrap_or_default(),
             count_limit_enabled: crate::config::COUNT_LIMIT
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -483,34 +530,80 @@ impl App {
             // (nothing would ever be fetched) or an absurd thread count
             self.worker_threads = threads.clamp(MIN_WORKER_THREADS, MAX_WORKER_THREADS);
         }
+        if let Some(extra) = prefs.extra_filters {
+            // saved values preload the drafts, but the list starts unfiltered:
+            // the applied filters stay inactive until the user clicks Apply
+            let mut fv = FilterValues::default();
+            fv.min_velocity = extra.min_velocity.filter(|v| *v >= 0.0);
+            if let Some(w) = extra.velocity_window {
+                if VELOCITY_COLUMNS.iter().any(|(_, id, _)| *id == w) {
+                    fv.velocity_window = w;
+                }
+            }
+            fv.min_profit_pct = extra.min_profit_pct.filter(|v| *v >= 0.0);
+            fv.min_profit_copper = extra.min_profit_copper.filter(|v| *v >= 0);
+            self.filter_draft = fv.clone();
+            self.filter_saved = fv;
+        }
         self
+    }
+
+    /// Full prefs snapshot. The persisted filters are the *saved* drafts, so
+    /// typing in the Filters window never leaks to disk without Apply.
+    fn current_prefs(&self) -> GuiPrefs {
+        GuiPrefs {
+            sort_by_profit_desc: Some(self.sort_by_profit_desc),
+            favorites_only: Some(self.favorites_only),
+            disciplines: Some(
+                self.discipline_filter
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect(),
+            ),
+            velocity_windows: Some(
+                VELOCITY_COLUMNS
+                    .iter()
+                    .filter(|(c, _, _)| self.velocity_enabled(*c))
+                    .map(|(_, id, _)| id.to_string())
+                    .collect(),
+            ),
+            worker_threads: Some(self.worker_threads),
+            extra_filters: Some(ExtraFiltersPrefs {
+                min_velocity: self.filter_saved.min_velocity,
+                velocity_window: Some(self.filter_saved.velocity_window.clone()),
+                min_profit_pct: self.filter_saved.min_profit_pct,
+                min_profit_copper: self.filter_saved.min_profit_copper,
+            }),
+        }
     }
 
     fn flush_prefs(&mut self) {
         if self.prefs_dirty {
-            let prefs = GuiPrefs {
-                sort_by_profit_desc: Some(self.sort_by_profit_desc),
-                favorites_only: Some(self.favorites_only),
-                disciplines: Some(
-                    self.discipline_filter
-                        .iter()
-                        .map(|d| d.to_string())
-                        .collect(),
-                ),
-                velocity_windows: Some(
-                    VELOCITY_COLUMNS
-                        .iter()
-                        .filter(|(c, _, _)| self.velocity_enabled(*c))
-                        .map(|(_, id, _)| id.to_string())
-                        .collect(),
-                ),
-                worker_threads: Some(self.worker_threads),
-            };
-            if let Err(e) = save_gui_prefs(&prefs) {
+            if let Err(e) = save_gui_prefs(&self.current_prefs()) {
                 self.status = format!("Failed to save GUI settings: {}", e);
             }
             self.prefs_dirty = false;
         }
+    }
+
+    /// Number of currently applied extra filters (for the button label).
+    fn applied_filter_count(&self) -> usize {
+        usize::from(self.filter_applied.min_velocity.is_some())
+            + usize::from(self.filter_applied.min_profit_pct.is_some())
+            + usize::from(self.filter_applied.min_profit_copper.is_some())
+    }
+
+    /// Persist the filter drafts (the Apply point) together with the rest of
+    /// the prefs. Returns false (leaving an error in the status line) when
+    /// the prefs file could not be written.
+    fn save_filter_prefs(&mut self) -> bool {
+        self.filter_saved = self.filter_draft.clone();
+        self.prefs_dirty = false;
+        if let Err(e) = save_gui_prefs(&self.current_prefs()) {
+            self.status = format!("Failed to save GUI settings: {}", e);
+            return false;
+        }
+        true
     }
 
     /// Write a single top-level key into the TOML config file, preserving any
@@ -1061,7 +1154,10 @@ impl eframe::App for App {
 
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
-                            self.show_settings = false;
+                            // NOTE: set `open`, not `self.show_settings`: the
+                            // trailing `self.show_settings = open` below would
+                            // otherwise overwrite this and reopen the window
+                            open = false;
                         }
                     });
                     ui.separator();
@@ -1071,6 +1167,160 @@ impl eframe::App for App {
                     ));
                 });
             self.show_settings = open;
+        }
+
+        // velocity windows the user enabled in Settings: the Filters window
+        // lets the user pick one of these for the min-velocity threshold
+        let enabled_windows: Vec<(SortColumn, &'static str)> = VELOCITY_COLUMNS
+            .iter()
+            .filter(|(c, _, _)| self.velocity_enabled(*c))
+            .map(|(c, id, _)| (*c, *id))
+            .collect();
+
+        if self.show_filters {
+            let mut open = self.show_filters;
+            egui::Window::new("Filters")
+                .open(&mut open)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label("Nothing here filters the list until you click Apply.");
+                    ui.add_space(4.0);
+                    // --- min velocity ---
+                    let mut vel_on = self.filter_draft.min_velocity.is_some();
+                    if ui
+                        .checkbox(&mut vel_on, "Min velocity (units/day)")
+                        .changed()
+                    {
+                        self.filter_draft.min_velocity =
+                            if vel_on { Some(0.0) } else { None };
+                    }
+                    if self.filter_draft.min_velocity.is_some() {
+                        ui.horizontal(|ui| {
+                            let mut v = self.filter_draft.min_velocity.unwrap_or(0.0);
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut v)
+                                        .speed(0.1)
+                                        .clamp_range(0.0..=1_000_000.0),
+                                )
+                                .changed()
+                            {
+                                self.filter_draft.min_velocity = Some(v.max(0.0));
+                            }
+                            ui.label("in");
+                            if enabled_windows.is_empty() {
+                                ui.label("no velocity windows enabled");
+                            } else {
+                                egui::ComboBox::from_id_source("filter_velocity_window")
+                                    .selected_text(self.filter_draft.velocity_window.clone())
+                                    .show_ui(ui, |ui| {
+                                        for (_, id) in &enabled_windows {
+                                            let _ = ui.selectable_value(
+                                                &mut self.filter_draft.velocity_window,
+                                                (*id).to_string(),
+                                                *id,
+                                            );
+                                        }
+                                    });
+                            }
+                        });
+                        if enabled_windows.is_empty() {
+                            ui.small("Enable a velocity window in Settings to use this filter.");
+                        } else {
+                            ui.small("Items with unknown velocity never pass this filter.");
+                        }
+                    }
+                    ui.add_space(4.0);
+                    // --- min profit % ---
+                    let mut pct_on = self.filter_draft.min_profit_pct.is_some();
+                    if ui
+                        .checkbox(&mut pct_on, "Min profit % (profit on cost)")
+                        .changed()
+                    {
+                        self.filter_draft.min_profit_pct =
+                            if pct_on { Some(0.0) } else { None };
+                    }
+                    if self.filter_draft.min_profit_pct.is_some() {
+                        ui.horizontal(|ui| {
+                            let mut v = self.filter_draft.min_profit_pct.unwrap_or(0.0);
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut v)
+                                        .speed(0.5)
+                                        .clamp_range(0.0..=1_000_000.0),
+                                )
+                                .changed()
+                            {
+                                self.filter_draft.min_profit_pct = Some(v.max(0.0));
+                            }
+                            ui.label("%");
+                        });
+                    }
+                    ui.add_space(4.0);
+                    // --- min profit money ---
+                    let mut copper_on = self.filter_draft.min_profit_copper.is_some();
+                    if ui
+                        .checkbox(&mut copper_on, "Min profit (total, copper)")
+                        .changed()
+                    {
+                        self.filter_draft.min_profit_copper =
+                            if copper_on { Some(0) } else { None };
+                    }
+                    if self.filter_draft.min_profit_copper.is_some() {
+                        ui.horizontal(|ui| {
+                            let mut v = self.filter_draft.min_profit_copper.unwrap_or(0);
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut v)
+                                        .speed(10.0)
+                                        .clamp_range(0..=999_999_999),
+                                )
+                                .changed()
+                            {
+                                self.filter_draft.min_profit_copper = Some(v.max(0));
+                            }
+                            ui.label("copper");
+                        });
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            // the saved window may have been disabled in Settings
+                            // since; fall back to the first enabled one so Apply
+                            // never stores a dead selection
+                            if !enabled_windows
+                                .iter()
+                                .any(|(_, id)| *id == self.filter_draft.velocity_window)
+                            {
+                                if let Some((_, id)) = enabled_windows.first() {
+                                    self.filter_draft.velocity_window = (*id).to_string();
+                                }
+                            }
+                            self.filter_applied = self.filter_draft.clone();
+                            if self.save_filter_prefs() {
+                                let n = self.applied_filter_count();
+                                self.status = if n == 0 {
+                                    "Filters cleared".to_string()
+                                } else {
+                                    format!("Filters applied ({} active)", n)
+                                };
+                            }
+                            open = false;
+                        }
+                        if ui.button("Close").clicked() {
+                            // discard edits that were never applied
+                            self.filter_draft = self.filter_saved.clone();
+                            open = false;
+                        }
+                    });
+                });
+            if !open {
+                // the window X behaves like Close: discard un-applied edits
+                // (no-op after Apply, which already saved the drafts)
+                self.filter_draft = self.filter_saved.clone();
+            }
+            self.show_filters = open;
         }
 
         // velocity windows changed in the settings -> fetch whatever is newly
@@ -1128,6 +1378,20 @@ impl App {
                 }
             }
             ui.separator();
+            // extra numeric filters live in their own window; the list only
+            // changes when Apply is clicked there
+            let active = self.applied_filter_count();
+            let filters_label = if active > 0 {
+                format!("Filters ({} active)", active)
+            } else {
+                "Filters".to_string()
+            };
+            if ui.button(filters_label).clicked() {
+                // start from the last saved values each time the window opens
+                self.filter_draft = self.filter_saved.clone();
+                self.show_filters = true;
+            }
+            ui.separator();
             if !self.velocities_requested.is_empty() {
                 ui.spinner();
                 ui.label(format!(
@@ -1156,6 +1420,38 @@ impl App {
                             .iter()
                             .any(|d| self.discipline_filter.contains(d))
                     })
+            })
+            // extra Filters-window thresholds (only what was Applied counts)
+            .filter(|i| {
+                if let Some(min_cu) = self.filter_applied.min_profit_copper {
+                    if i.profit.to_copper_value() < min_cu {
+                        return false;
+                    }
+                }
+                if let Some(min_pct) = self.filter_applied.min_profit_pct {
+                    if i.profit_on_cost() * 100.0 < min_pct {
+                        return false;
+                    }
+                }
+                if let Some(min_vel) = self.filter_applied.min_velocity {
+                    let win = self.filter_applied.velocity_window.as_str();
+                    let value = self.velocities.get(&i.id).and_then(|v| {
+                        VELOCITY_COLUMNS
+                            .iter()
+                            .find(|(_, id, _)| *id == win)
+                            .and_then(|(_, _, accessor)| accessor(v))
+                    });
+                    match value {
+                        Some(x) => {
+                            if x < min_vel {
+                                return false;
+                            }
+                        }
+                        // unknown velocity can never satisfy a threshold
+                        None => return false,
+                    }
+                }
+                true
             })
             .filter(|i| i.count > 0)
             .collect();
