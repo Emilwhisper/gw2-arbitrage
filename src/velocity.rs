@@ -11,9 +11,20 @@
 //! Multi-ID requests are NOT supported (verified empirically), so this module
 //! fetches one item at a time; the GUI batches calls across worker threads.
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Shared HTTP client. Reusing a single client keeps the connection pool
+/// (keep-alive) alive across requests and avoids rebuilding TLS state for every
+/// call, which matters when many worker threads fetch concurrently.
+static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client")
+});
 
 /// Sell velocity per trailing window, in units/day.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -150,7 +161,7 @@ pub async fn fetch_velocity(
     fetch_hourly: bool,
     fetch_daily: bool,
 ) -> Result<Velocity, String> {
-    let client = reqwest::Client::new();
+    let client = &*CLIENT;
     let now = now_unix();
     let mut v = Velocity::default();
 

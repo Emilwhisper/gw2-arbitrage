@@ -193,7 +193,17 @@ struct App {
     prefs_dirty: bool,
     /// "Prefetch icons" progress: (done, total); `None` when not running
     prefetch_progress: Option<(usize, usize)>,
+    /// background worker threads used for velocity / icon fetching
+    worker_threads: u32,
 }
+
+/// Bounds for the "Background worker threads" setting.
+const MIN_WORKER_THREADS: u32 = 1;
+const DEFAULT_WORKER_THREADS: u32 = 4;
+/// Upper bound kept deliberately modest: velocity data comes from a community
+/// service with no published rate limit, and each item only needs 1-2 requests,
+/// so past this point the server (not the client) is the bottleneck.
+const MAX_WORKER_THREADS: u32 = 16;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct GuiPrefs {
@@ -201,6 +211,7 @@ struct GuiPrefs {
     favorites_only: Option<bool>,
     disciplines: Option<Vec<String>>,
     velocity_windows: Option<Vec<String>>,
+    worker_threads: Option<u32>,
 }
 
 const GUI_PREFS_FILE: &str = "gui_prefs.json";
@@ -273,6 +284,7 @@ impl App {
             },
             prefs_dirty: false,
             prefetch_progress: None,
+            worker_threads: DEFAULT_WORKER_THREADS,
         }
         .with_prefs(load_gui_prefs())
     }
@@ -409,12 +421,17 @@ impl App {
         let queue = Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::from(ids),
         ));
-        for _ in 0..4 {
+        for _ in 0..self.worker_threads {
             let tx = self.events_sender.clone();
             let queue = Arc::clone(&queue);
             thread::spawn(move || {
-                let runtime =
-                    tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                // each worker handles one blocking request at a time, so a
+                // current-thread runtime is enough and avoids spawning a
+                // CPU-count-sized thread pool per worker
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime");
                 loop {
                     let job = queue.lock().expect("queue poisoned").pop_front();
                     let Some((id, icon_url)) = job else {
@@ -463,6 +480,11 @@ impl App {
                 .map(|(c, _, _)| *c)
                 .collect();
         }
+        if let Some(threads) = prefs.worker_threads {
+            // clamp: a hand-edited prefs file must not be able to set 0 workers
+            // (nothing would ever be fetched) or an absurd thread count
+            self.worker_threads = threads.clamp(MIN_WORKER_THREADS, MAX_WORKER_THREADS);
+        }
         self
     }
 
@@ -484,6 +506,7 @@ impl App {
                         .map(|(_, id, _)| id.to_string())
                         .collect(),
                 ),
+                worker_threads: Some(self.worker_threads),
             };
             if let Err(e) = save_gui_prefs(&prefs) {
                 self.status = format!("Failed to save GUI settings: {}", e);
@@ -598,12 +621,17 @@ impl App {
         let queue = Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::from(jobs),
         ));
-        for _ in 0..4 {
+        for _ in 0..self.worker_threads {
             let tx = self.events_sender.clone();
             let queue = Arc::clone(&queue);
             thread::spawn(move || {
-                let runtime =
-                    tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                // each worker handles one blocking request at a time, so a
+                // current-thread runtime is enough and avoids spawning a
+                // CPU-count-sized thread pool per worker
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime");
                 loop {
                     let job = queue.lock().expect("queue poisoned").pop_front();
                     let Some((id, fetch_hourly, fetch_daily)) = job else {
@@ -649,7 +677,10 @@ impl App {
         self.velocities_requested.insert(item_id);
         let tx = self.events_sender.clone();
         thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime");
             let v = runtime
                 .block_on(velocity::fetch_velocity(item_id, hourly, daily))
                 .ok();
@@ -996,6 +1027,28 @@ impl eframe::App for App {
                             }
                         }
                     });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Background worker threads:");
+                        let mut threads = self.worker_threads;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut threads,
+                                    MIN_WORKER_THREADS..=MAX_WORKER_THREADS,
+                                )
+                                .integer(),
+                            )
+                            .changed()
+                        {
+                            self.worker_threads =
+                                threads.clamp(MIN_WORKER_THREADS, MAX_WORKER_THREADS);
+                            self.prefs_dirty = true;
+                        }
+                    });
+                    ui.small(
+                        "Applies the next time velocity data is fetched. Higher values fetch faster, but send more simultaneous requests.",
+                    );
                     ui.separator();
 
                     ui.horizontal(|ui| {
