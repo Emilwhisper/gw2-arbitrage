@@ -3,6 +3,7 @@ pub mod api;
 pub mod config;
 pub mod crafting;
 pub mod gw2efficiency;
+pub mod gui;
 pub mod icons;
 pub mod item;
 pub mod money;

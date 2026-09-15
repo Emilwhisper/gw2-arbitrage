@@ -6,7 +6,7 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [ ] Retain the `icon` URL in `Item` (from `/v2/items`) instead of dropping it in the `ApiItem → Item` conversion (`#[serde(default)]` so old cached item DBs still parse; may require a one-time items re-download / cache bump).
 - [ ] Extract data loading + profit pipeline from `main.rs` into library functions returning structured data (e.g. `Analysis { items, recipes, profitable_items }`) instead of printing directly.
 - [ ] Reduce reliance on the global `CONFIG` (pass `CraftingOptions` / settings as parameters where practical), or document that the GUI must initialize `CONFIG` at startup.
-- [ ] Add `--cli` flag / argument detection so the single binary can run in either console or GUI mode.
+- [x] Add `--cli` flag / argument detection so the single binary can run in either console or GUI mode. (No args or `--cli` absent logic: no args → GUI; `--cli` or any arguments → CLI.)
 - [x] Icon caching: new `icons.rs` library module — `get_icon(item_id, url, notify) -> Option<PathBuf>` (check disk → download PNG → save → return path). Uses `CONFIG.icons_dir` (`<cache-dir>\icons`).
   - [ ] Store raw PNGs in a permanent `icons/` subfolder of the cache dir (`...\gw2-arbitrage\icons\<item_id>.png`); icons are immutable, no expiry, and `flush_cache` only deletes `cache_*` files so they survive `--reset-cache`.
   - [ ] Lazy/on-demand download for displayed rows + detail window (avoids 60k+ downloads on first run).
@@ -16,9 +16,10 @@ Phased plan to add a Windows-first GUI to `gw2-arbitrage` while keeping the CLI 
 - [ ] Add shopping-list rendering as a function returning data (not just `println!`), so the detail window can reuse it.
 
 ## Phase 1 — GUI framework and basic window
-- [ ] Choose framework. Recommendation: **egui/eframe** (pure Rust, lightweight, great Windows support, easy tables/lists/images). Alternatives: `iced`, `Tauri` (web UI), `Slint`.
-- [ ] Basic window: "Run analysis" button with progress indicator (background tokio task + progress channel).
-- [ ] Show the profitable-items list in a sortable table: icon, name, disciplines, item id, total profit, count, profit/item, steps, profit/step, profit-on-cost.
+- [x] Choose framework. → **egui/eframe 0.27** (pure Rust, lightweight, great Windows support).
+- [x] Basic window: "Run analysis" button with progress indicator (background tokio task + mpsc channel).
+- [x] Show the profitable-items list in a sortable table: name, disciplines, item id, total profit, profit/item, profit/step.
+- [x] Clicking a row opens a detail window (shopping list, sell-at/breakeven, unknown-recipe warning).
 - [ ] Filters matching CLI options: disciplines multi-select, `--count` limit, timegated/ascended include toggles.
 - [ ] CSV export button (`--output-csv` equivalent).
 - [ ] "Refresh cache / reset cache" button (`--reset-cache` equivalent).

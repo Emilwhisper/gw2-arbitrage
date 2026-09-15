@@ -16,6 +16,17 @@ const ITEM_STACK_SIZE: u32 = 250; // GW2 uses a "stack size" of 250
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // GUI mode when launched with no arguments (double-click on Windows);
+    // CLI mode with `--cli` or any other arguments.
+    if std::env::args().count() == 1 && !CONFIG.cli {
+        gui::run().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    run_cli().await
+}
+
+async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let notify_print = |url: &str| println!("Fetching {}", url);
     let notify = Some(&notify_print as &dyn Fn(&str));
 

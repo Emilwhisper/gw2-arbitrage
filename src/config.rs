@@ -43,6 +43,7 @@ pub struct Config {
     pub rn: Option<Rational32>,
 
     pub cache_dir: PathBuf,
+    pub cli: bool,
     pub icons_dir: PathBuf,
     pub api_recipes_file: PathBuf,
     pub custom_recipes_file: PathBuf,
@@ -70,6 +71,7 @@ impl Config {
         config.crafting.value = opt.value;
 
         config.output_csv = opt.output_csv;
+        config.cli = opt.cli;
 
         config.item_id = opt.item_id;
 
@@ -257,6 +259,10 @@ struct Opt {
     /// Threshold - min profit per item in copper
     #[structopt(long)]
     threshold: Option<u32>,
+
+    /// Run in console (CLI) mode even without other arguments
+    #[structopt(long)]
+    cli: bool,
 
     #[structopt(short = "d", long = "disciplines", use_delimiter = true, help = &DISCIPLINES_HELP, parse(try_from_str = get_discipline))]
     filter_disciplines: Option<Vec<Discipline>>,
