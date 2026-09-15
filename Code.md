@@ -133,7 +133,7 @@ New/changed modules:
   - The item detail window lists the velocity of every enabled window for that item, and fetches it on demand (`request_item_velocity`) when the item has not been processed by the workers yet.
 - Cargo.toml additions: `eframe 0.27`, `egui_extras 0.27` (TableBuilder for the sortable, resizable, full-width table), `image 0.25` (png only), `rfd 0.12`.
 
-Remaining known gaps (see `todo.md`): wallet auto-conversion; background auto-refresh; material-bank awareness; friendly error dialogs; console window still appears in GUI mode (intentionally kept for now).
+Remaining known gaps (see `todo.md`): wallet auto-conversion; background auto-refresh; material-bank awareness; friendly error dialogs; console window still appears in GUI mode (intentionally kept for now); app/window icon deliberately deferred (no icon is set in code today — the window is created with only `with_inner_size` + `with_title`, so adding one later is a one-line `ViewportBuilder::with_icon` change plus a `.ico`/PNG asset).
 
 - `lib.rs` already exports everything (`pub mod ...`), so a GUI binary can reuse the data loading, crafting cost, and profit functions directly.
 - Coupling points to be aware of:
