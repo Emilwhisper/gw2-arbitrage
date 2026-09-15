@@ -258,8 +258,12 @@ impl Item {
         match &self.id {
             // Base game
             // Empyreal Fragment, Dragonite Ore, Pile of Bloodstone Dust
-            46735 | 46733 | 46731 if CONFIG.ascended != None => {
-                Some(Money::from_copper(CONFIG.ascended.unwrap() as i32))
+            46735 | 46733 | 46731
+                if config::INCLUDE_ASCENDED.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                Some(Money::from_copper(
+                    config::ASCENDED_VALUE.load(std::sync::atomic::Ordering::Relaxed) as i32,
+                ))
             }
             // LW1
             // 50025 Blade Shard

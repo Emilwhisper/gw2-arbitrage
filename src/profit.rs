@@ -250,8 +250,14 @@ pub fn calculate_crafting_profit(
     let mut breakeven = Money::zero();
 
     // simulate crafting 1 item per loop iteration until it becomes unprofitable
+    let count_limit = config::COUNT_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+    let count_limit = if count_limit < 0 {
+        None
+    } else {
+        Some(count_limit as u32)
+    };
     loop {
-        if let Some(count) = opt.count {
+        if let Some(count) = count_limit {
             if crafting_count + output_item_count > count {
                 break;
             }

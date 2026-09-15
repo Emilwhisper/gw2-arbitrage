@@ -6,7 +6,7 @@ use std::io::Read;
 use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use once_cell::sync::Lazy;
@@ -23,6 +23,21 @@ pub const CACHE_PREFIX: &str = "cache_";
 /// Read live by the crafting-cost calculations so the GUI can flip it without
 /// a restart. Initialized from the CLI flag or the config file.
 pub static INCLUDE_TIMEGATED: AtomicBool = AtomicBool::new(false);
+
+/// Global toggle for including ascended materials (Piles of Bloodstone Dust,
+/// Dragonite Ore, Empyreal Fragments). Read live by `Item::token_value` so the
+/// GUI can flip it without a restart. Initialized from the CLI flag, the
+/// `include_ascended` config key or the `[currencies] ascended` value.
+pub static INCLUDE_ASCENDED: AtomicBool = AtomicBool::new(false);
+
+/// Opportunity cost per ascended material, in copper (only meaningful while
+/// `INCLUDE_ASCENDED` is true).
+pub static ASCENDED_VALUE: AtomicI64 = AtomicI64::new(0);
+
+/// Maximum number of items produced per recipe (`--count`). `-1` means no
+/// limit. Read live by the profit simulation so the GUI can change it without
+/// a restart.
+pub static COUNT_LIMIT: AtomicI64 = AtomicI64::new(-1);
 
 #[derive(Debug, Default)]
 pub struct CraftingOptions {
@@ -73,7 +88,6 @@ impl Config {
         let opt = Opt::from_args();
 
         config.crafting.include_timegated = opt.include_timegated;
-        config.crafting.count = opt.count;
         config.crafting.threshold = opt.threshold;
         config.crafting.value = opt.value;
 
@@ -117,11 +131,20 @@ impl Config {
 
         config.ascended = if let Some(provided) = opt.ascended_value {
             provided.or(Some(0))
+        } else if let Some(true) = file.include_ascended {
+            Some(0)
         } else if let Some(currencies) = &file.currencies {
             currencies.ascended
         } else {
             None
         };
+        INCLUDE_ASCENDED.store(config.ascended.is_some(), Ordering::Relaxed);
+        ASCENDED_VALUE.store(config.ascended.unwrap_or(0) as i64, Ordering::Relaxed);
+
+        // count limit: CLI option, else the saved config-file value
+        let count = opt.count.or(file.count);
+        config.crafting.count = count;
+        COUNT_LIMIT.store(count.map(i64::from).unwrap_or(-1), Ordering::Relaxed);
 
         config.karma = if let Some(value) = opt.karma {
             Rational32::approximate_float(value)
@@ -241,6 +264,8 @@ struct ConfigFile {
     api_key: Option<String>,
     lang: Option<String>,
     include_timegated: Option<bool>,
+    include_ascended: Option<bool>,
+    count: Option<u32>,
     currencies: Option<ConfigFileCurrencySection>,
     blacklist: Option<ConfigFileBlacklistSection>,
 }
@@ -355,6 +380,9 @@ static CONFIG_FILE_HELP: Lazy<String> = Lazy::new(|| {
 
     api_key = "<key-with-unlocks-scope>"
     lang = "<lang>"
+    include_timegated = <true|false>
+    include_ascended = <true|false>
+    count = <max items produced per recipe>
 
     [currencies]
     ascended = <opportunity cost per item>

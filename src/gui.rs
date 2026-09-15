@@ -183,6 +183,9 @@ struct App {
     detail: Option<DetailData>,
     show_settings: bool,
     api_key_input: String,
+    /// `--count` runtime setting (limit items produced per recipe)
+    count_limit_enabled: bool,
+    count_limit_input: u32,
     prefs_dirty: bool,
 }
 
@@ -249,6 +252,18 @@ impl App {
             detail: None,
             show_settings: false,
             api_key_input: crate::config::CONFIG.api_key.clone().unwrap_or_default(),
+            count_limit_enabled: crate::config::COUNT_LIMIT
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 0,
+            count_limit_input: {
+                let limit =
+                    crate::config::COUNT_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+                if limit > 0 {
+                    limit as u32
+                } else {
+                    1
+                }
+            },
             prefs_dirty: false,
         }
         .with_prefs(load_gui_prefs())
@@ -454,6 +469,23 @@ impl App {
     fn set_include_timegated(&mut self, enabled: bool) {
         crate::config::INCLUDE_TIMEGATED.store(enabled, std::sync::atomic::Ordering::Relaxed);
         self.write_config_key("include_timegated", Some(toml::Value::Boolean(enabled)));
+    }
+
+    /// `--include-ascended`: allow recipes that need Piles of Bloodstone Dust,
+    /// Dragonite Ore or Empyreal Fragments (opportunity cost 0 unless set in
+    /// the config file).
+    fn set_include_ascended(&mut self, enabled: bool) {
+        crate::config::INCLUDE_ASCENDED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.write_config_key("include_ascended", Some(toml::Value::Boolean(enabled)));
+    }
+
+    /// `--count`: limit the number of items produced per recipe. Disabled means
+    /// no limit (stored as `-1` in the atomic, key removed from the config).
+    fn set_count_limit(&mut self, enabled: bool, count: u32) {
+        let value = if enabled { i64::from(count.max(1)) } else { -1 };
+        crate::config::COUNT_LIMIT.store(value, std::sync::atomic::Ordering::Relaxed);
+        let toml_value = enabled.then(|| toml::Value::Integer(value));
+        self.write_config_key("count", toml_value);
     }
 
     /// Whether a velocity window's column is enabled in the settings.
@@ -779,6 +811,47 @@ impl eframe::App for App {
                         self.set_include_timegated(timegated);
                     }
                     ui.small("Takes effect on the next analysis run and is remembered.");
+                    ui.add_space(8.0);
+                    let mut ascended =
+                        crate::config::INCLUDE_ASCENDED.load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(
+                            &mut ascended,
+                            "Include ascended materials (Bloodstone Dust, Dragonite Ore, Empyreal Fragments)",
+                        )
+                        .changed()
+                    {
+                        self.set_include_ascended(ascended);
+                    }
+                    let mut count_enabled = self.count_limit_enabled;
+                    if ui
+                        .checkbox(
+                            &mut count_enabled,
+                            "Limit the items produced per recipe (--count)",
+                        )
+                        .changed()
+                    {
+                        self.count_limit_enabled = count_enabled;
+                        let count = self.count_limit_input;
+                        self.set_count_limit(count_enabled, count);
+                    }
+                    if self.count_limit_enabled {
+                        let mut count = self.count_limit_input;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut count)
+                                    .speed(1.0)
+                                    .clamp_range(1..=1_000_000),
+                            )
+                            .changed()
+                        {
+                            self.count_limit_input = count;
+                            self.set_count_limit(true, count);
+                        }
+                    }
+                    ui.small(
+                        "Ascended and count settings apply on the next analysis run and are remembered.",
+                    );
                     ui.add_space(8.0);
                     ui.strong("Velocity windows");
                     ui.horizontal_wrapped(|ui| {
