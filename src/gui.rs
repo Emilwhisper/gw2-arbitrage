@@ -1,4 +1,4 @@
-//! Minimal egui/eframe GUI for gw2-arbitrage.
+﻿//! Minimal egui/eframe GUI for gw2-arbitrage.
 //!
 //! Runs the analysis pipeline from `analysis.rs` on a background thread and
 //! displays the profitable items in a list. Clicking an item opens a detail
@@ -39,7 +39,7 @@ enum Event {
     ),
     ItemError(u32, String),
     IconLoaded(u32, Option<PathBuf>),
-    VelocityLoaded(u32, Option<velocity::Velocity>),
+    VelocityLoaded(u32, Option<velocity::Velocity>, bool, bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,12 +57,31 @@ enum SortColumn {
     Vel2w,
     Vel1m,
     Vel3m,
+    Vel6m,
+    Vel1y,
+    Vel2y,
 }
 
 impl SortColumn {
     /// Default direction when a column is first clicked.
     fn default_desc(self) -> bool {
         !matches!(self, SortColumn::Name | SortColumn::Disciplines)
+    }
+
+    fn is_velocity(self) -> bool {
+        matches!(
+            self,
+            SortColumn::Vel6h
+                | SortColumn::Vel12h
+                | SortColumn::Vel24h
+                | SortColumn::Vel7d
+                | SortColumn::Vel2w
+                | SortColumn::Vel1m
+                | SortColumn::Vel3m
+                | SortColumn::Vel6m
+                | SortColumn::Vel1y
+                | SortColumn::Vel2y
+        )
     }
 
     fn header(self) -> &'static str {
@@ -80,11 +99,28 @@ impl SortColumn {
             SortColumn::Vel2w => "Vel 2w",
             SortColumn::Vel1m => "Vel 1m",
             SortColumn::Vel3m => "Vel 3m",
+            SortColumn::Vel6m => "Vel 6m",
+            SortColumn::Vel1y => "Vel 1y",
+            SortColumn::Vel2y => "Vel 2y",
         }
     }
 }
 
-const ALL_SORT_COLUMNS: [SortColumn; 13] = [
+/// (column, prefs id, Velocity accessor) in display order.
+const VELOCITY_COLUMNS: &[(SortColumn, &str, fn(&velocity::Velocity) -> Option<f64>)] = &[
+    (SortColumn::Vel6h, "6h", |v| v.h6),
+    (SortColumn::Vel12h, "12h", |v| v.h12),
+    (SortColumn::Vel24h, "24h", |v| v.h24),
+    (SortColumn::Vel7d, "7d", |v| v.d7),
+    (SortColumn::Vel2w, "2w", |v| v.w2),
+    (SortColumn::Vel1m, "1m", |v| v.m1),
+    (SortColumn::Vel3m, "3m", |v| v.m3),
+    (SortColumn::Vel6m, "6m", |v| v.m6),
+    (SortColumn::Vel1y, "1y", |v| v.y1),
+    (SortColumn::Vel2y, "2y", |v| v.y2),
+];
+
+const ALL_SORT_COLUMNS: [SortColumn; 16] = [
     SortColumn::Name,
     SortColumn::Disciplines,
     SortColumn::ItemId,
@@ -98,6 +134,9 @@ const ALL_SORT_COLUMNS: [SortColumn; 13] = [
     SortColumn::Vel2w,
     SortColumn::Vel1m,
     SortColumn::Vel3m,
+    SortColumn::Vel6m,
+    SortColumn::Vel1y,
+    SortColumn::Vel2y,
 ];
 
 pub fn run() -> Result<(), eframe::Error> {
@@ -130,6 +169,12 @@ struct App {
     pending_icons: HashSet<u32>,
     velocities: HashMap<u32, velocity::Velocity>,
     velocities_requested: HashSet<u32>,
+    /// item ids whose hourly / daily history was already fetched this session
+    velocity_hourly_done: HashSet<u32>,
+    velocity_daily_done: HashSet<u32>,
+    /// set when the enabled velocity windows changed and workers should restart
+    velocity_rescan: bool,
+    enabled_velocity: Vec<SortColumn>,
     sort_column: SortColumn,
     sort_desc: bool,
     detail_item_id: Option<u32>,
@@ -146,6 +191,7 @@ struct GuiPrefs {
     sort_by_profit_desc: Option<bool>,
     favorites_only: Option<bool>,
     disciplines: Option<Vec<String>>,
+    velocity_windows: Option<Vec<String>>,
 }
 
 const GUI_PREFS_FILE: &str = "gui_prefs.json";
@@ -191,6 +237,10 @@ impl App {
             pending_icons: HashSet::new(),
             velocities: HashMap::new(),
             velocities_requested: HashSet::new(),
+            velocity_hourly_done: HashSet::new(),
+            velocity_daily_done: HashSet::new(),
+            velocity_rescan: false,
+            enabled_velocity: VELOCITY_COLUMNS.iter().map(|(c, _, _)| *c).collect(),
             sort_column: SortColumn::TotalProfit,
             sort_desc: true,
             detail_item_id: None,
@@ -324,6 +374,13 @@ impl App {
                 .filter_map(|d| d.parse::<config::Discipline>().ok())
                 .collect();
         }
+        if let Some(windows) = prefs.velocity_windows {
+            self.enabled_velocity = VELOCITY_COLUMNS
+                .iter()
+                .filter(|(_, id, _)| windows.iter().any(|w| w == id))
+                .map(|(c, _, _)| *c)
+                .collect();
+        }
         self
     }
 
@@ -336,6 +393,13 @@ impl App {
                     self.discipline_filter
                         .iter()
                         .map(|d| d.to_string())
+                        .collect(),
+                ),
+                velocity_windows: Some(
+                    VELOCITY_COLUMNS
+                        .iter()
+                        .filter(|(c, _, _)| self.velocity_enabled(*c))
+                        .map(|(_, id, _)| id.to_string())
                         .collect(),
                 ),
             };
@@ -392,23 +456,48 @@ impl App {
         self.write_config_key("include_timegated", Some(toml::Value::Boolean(enabled)));
     }
 
+    /// Whether a velocity window's column is enabled in the settings.
+    fn velocity_enabled(&self, col: SortColumn) -> bool {
+        self.enabled_velocity.contains(&col)
+    }
+
     /// Kick off background workers that fetch sell-velocity data for every
     /// profitable item from datawars2.ie (one request per item; the API does
     /// not support multi-ID requests).
+    ///
+    /// Every endpoint group is one HTTP request per item: the hourly endpoint
+    /// feeds the 6h/12h/24h windows, the daily endpoint feeds 7d..2y. A group
+    /// is skipped entirely when all of its windows are disabled in the
+    /// settings, and items are only re-fetched for groups that are enabled but
+    /// were not fetched yet.
     fn spawn_velocity_workers(&mut self) {
-        let ids: Vec<u32> = self
-            .profitable_items
+        let need_hourly = VELOCITY_COLUMNS[..3]
             .iter()
-            .filter(|i| i.count > 0 && !self.velocities.contains_key(&i.id))
-            .map(|i| i.id)
-            .collect();
-        if ids.is_empty() {
+            .any(|(c, _, _)| self.velocity_enabled(*c));
+        let need_daily = VELOCITY_COLUMNS[3..]
+            .iter()
+            .any(|(c, _, _)| self.velocity_enabled(*c));
+        if !need_hourly && !need_daily {
             return;
         }
-        self.velocities_requested
-            .extend(ids.iter().copied());
+        let jobs: Vec<(u32, bool, bool)> = self
+            .profitable_items
+            .iter()
+            .filter(|i| i.count > 0)
+            .filter_map(|i| {
+                let hourly = need_hourly && !self.velocity_hourly_done.contains(&i.id);
+                let daily = need_daily && !self.velocity_daily_done.contains(&i.id);
+                (hourly || daily).then_some((i.id, hourly, daily))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        for (id, _, _) in &jobs {
+            self.velocities_requested.insert(*id);
+        }
         let queue = Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::from(ids),
+            std::collections::VecDeque::from(jobs),
         ));
         for _ in 0..4 {
             let tx = self.events_sender.clone();
@@ -417,12 +506,14 @@ impl App {
                 let runtime =
                     tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
                 loop {
-                    let id = queue.lock().expect("queue poisoned").pop_front();
-                    let Some(id) = id else { break };
+                    let job = queue.lock().expect("queue poisoned").pop_front();
+                    let Some((id, fetch_hourly, fetch_daily)) = job else {
+                        break;
+                    };
                     let v = runtime
-                        .block_on(velocity::fetch_velocity(id))
+                        .block_on(velocity::fetch_velocity(id, fetch_hourly, fetch_daily))
                         .ok();
-                    let _ = tx.send(Event::VelocityLoaded(id, v));
+                    let _ = tx.send(Event::VelocityLoaded(id, v, fetch_hourly, fetch_daily));
                 }
             });
         }
@@ -548,11 +639,32 @@ impl App {
                 Event::IconLoaded(item_id, path) => {
                     self.load_icon_texture(ctx, item_id, path);
                 }
-                Event::VelocityLoaded(item_id, v) => {
-                    self.velocities_requested.remove(&item_id);
-                    if let Some(v) = v {
-                        self.velocities.insert(item_id, v);
+                Event::VelocityLoaded(item_id, v, fetched_hourly, fetched_daily) => {
+                    if fetched_hourly {
+                        self.velocity_hourly_done.insert(item_id);
                     }
+                    if fetched_daily {
+                        self.velocity_daily_done.insert(item_id);
+                    }
+                    if let Some(v) = v {
+                        // merge: only overwrite the groups that were fetched
+                        let entry = self.velocities.entry(item_id).or_default();
+                        if fetched_hourly {
+                            entry.h6 = v.h6;
+                            entry.h12 = v.h12;
+                            entry.h24 = v.h24;
+                        }
+                        if fetched_daily {
+                            entry.d7 = v.d7;
+                            entry.w2 = v.w2;
+                            entry.m1 = v.m1;
+                            entry.m3 = v.m3;
+                            entry.m6 = v.m6;
+                            entry.y1 = v.y1;
+                            entry.y2 = v.y2;
+                        }
+                    }
+                    self.velocities_requested.remove(&item_id);
                 }
             }
         }
@@ -667,7 +779,24 @@ impl eframe::App for App {
                         self.set_include_timegated(timegated);
                     }
                     ui.small("Takes effect on the next analysis run and is remembered.");
-                    ui.add_space(4.0);
+                    ui.add_space(8.0);
+                    ui.strong("Velocity windows");
+                    ui.horizontal_wrapped(|ui| {
+                        for (col, id, _) in VELOCITY_COLUMNS {
+                            let mut checked = self.velocity_enabled(*col);
+                            if ui.checkbox(&mut checked, *id).changed() {
+                                if checked {
+                                    self.enabled_velocity.push(*col);
+                                } else {
+                                    self.enabled_velocity.retain(|c| *c != *col);
+                                }
+                                self.prefs_dirty = true;
+                                self.velocity_rescan = true;
+                            }
+                        }
+                    });
+                    ui.separator();
+
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
                             self.show_settings = false;
@@ -681,15 +810,29 @@ impl eframe::App for App {
                 });
             self.show_settings = open;
         }
+
+        // velocity windows changed in the settings -> fetch whatever is newly
+        // enabled (disabled groups stop being requested)
+        if self.velocity_rescan {
+            self.velocity_rescan = false;
+            if self.analysis.is_some() && !self.running {
+                self.spawn_velocity_workers();
+            }
+        }
     }
 }
 
 impl App {
     fn show_item_list(&mut self, ui: &mut egui::Ui, analysis: &Analysis) {
+        // if the sorted column was disabled in the settings, fall back to profit
+        if self.sort_column.is_velocity() && !self.velocity_enabled(self.sort_column) {
+            self.sort_column = SortColumn::TotalProfit;
+            self.sort_desc = true;
+        }
         // filters
         ui.horizontal(|ui| {
             let mut favs_only = self.favorites_only;
-            ui.checkbox(&mut favs_only, "★ only");
+            ui.checkbox(&mut favs_only, "\u{2605} only");
             if favs_only != self.favorites_only {
                 self.favorites_only = favs_only;
                 self.prefs_dirty = true;
@@ -723,7 +866,11 @@ impl App {
             ui.separator();
             if !self.velocities_requested.is_empty() {
                 ui.spinner();
-                ui.label(format!("loading velocity ({}/{})…", self.velocities.len(), self.velocities.len() + self.velocities_requested.len()));
+                ui.label(format!(
+                    "loading velocity ({}/{})\u{2026}",
+                    self.velocities.len(),
+                    self.velocities.len() + self.velocities_requested.len()
+                ));
             }
         });
         ui.separator();
@@ -769,6 +916,17 @@ impl App {
 
         let sort_key = |i: &ProfitableItem| -> (f64, String) {
             let (name, disciplines) = item_info(analysis, i.id);
+            let velocity_value = |col: SortColumn| -> f64 {
+                velocities
+                    .get(&i.id)
+                    .and_then(|v| {
+                        VELOCITY_COLUMNS
+                            .iter()
+                            .find(|(c, _, _)| *c == col)
+                            .and_then(|(_, _, accessor)| accessor(v))
+                    })
+                    .unwrap_or(f64::NEG_INFINITY)
+            };
             match sort_column {
                 SortColumn::Name => (0.0, name.to_lowercase()),
                 SortColumn::Disciplines => (0.0, disciplines),
@@ -781,13 +939,7 @@ impl App {
                     i.profit_per_crafting_step().to_copper_value() as f64,
                     String::new(),
                 ),
-                SortColumn::Vel6h => (velocities.get(&i.id).and_then(|v| v.h6).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel12h => (velocities.get(&i.id).and_then(|v| v.h12).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel24h => (velocities.get(&i.id).and_then(|v| v.h24).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel7d => (velocities.get(&i.id).and_then(|v| v.d7).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel2w => (velocities.get(&i.id).and_then(|v| v.w2).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel1m => (velocities.get(&i.id).and_then(|v| v.m1).unwrap_or(f64::NEG_INFINITY), String::new()),
-                SortColumn::Vel3m => (velocities.get(&i.id).and_then(|v| v.m3).unwrap_or(f64::NEG_INFINITY), String::new()),
+                col => (velocity_value(col), String::new()),
             }
         };
 
@@ -821,29 +973,32 @@ impl App {
             .map(|(id, item)| (*id, item.icon.clone()))
             .collect();
 
+        // visible columns: non-velocity always; velocity only if enabled
+        let mut visible_columns: Vec<SortColumn> = Vec::new();
+        for col in ALL_SORT_COLUMNS {
+            if !col.is_velocity() || self.velocity_enabled(col) {
+                visible_columns.push(col);
+            }
+        }
+
         let mut clicked: Option<u32> = None;
         let mut favorite_toggled: Option<u32> = None;
         let mut icons_requested: Vec<u32> = vec![];
         let mut sort_changed: Option<(SortColumn, bool)> = None;
-        TableBuilder::new(ui)
+        let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::remainder())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
+            .column(Column::auto());
+        for col in visible_columns.iter().copied() {
+            table = table.column(if col == SortColumn::Name {
+                Column::remainder()
+            } else {
+                Column::auto()
+            });
+        }
+        table
             .header(26.0, |mut header| {
                 header.col(|ui| {
                     ui.strong("Icon");
@@ -851,7 +1006,7 @@ impl App {
                 header.col(|ui| {
                     ui.strong("\u{2605}");
                 });
-                for col in ALL_SORT_COLUMNS {
+                for col in visible_columns.iter().copied() {
                     header.col(|ui| {
                         let is_active = sort_column == col;
                         let arrow = if is_active {
@@ -910,53 +1065,55 @@ impl App {
                             .get(&item.id)
                             .map(|i| rarity_color(i.rarity()))
                             .unwrap_or(egui::Color32::PLACEHOLDER);
-                        row.col(|ui| {
-                            if ui
-                                .selectable_label(
-                                    detail_item_id == Some(item.id),
-                                    egui::RichText::new(name).color(name_color),
-                                )
-                                .clicked()
-                            {
-                                clicked = Some(item.id);
-                            }
-                        });
-                        row.col(|ui| {
-                            ui.label(disciplines);
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{}", item.id));
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{}", item.profit));
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{}", item.profit_per_item()));
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{}", item.profit_per_crafting_step()));
-                        });
-                        // velocity columns (units/day); "\u{2026}" = loading, "\u{2013}" = no data
                         let v = velocities.get(&item.id);
-                        let loading = !velocities.contains_key(&item.id);
-                        for value in [
-                            v.and_then(|v| v.h6),
-                            v.and_then(|v| v.h12),
-                            v.and_then(|v| v.h24),
-                            v.and_then(|v| v.d7),
-                            v.and_then(|v| v.w2),
-                            v.and_then(|v| v.m1),
-                            v.and_then(|v| v.m3),
-                        ] {
-                            row.col(|ui| match value {
-                                Some(x) => {
-                                    ui.label(format!("{:.1}", x));
+                        let velocity_loading = !velocities.contains_key(&item.id);
+                        for col in visible_columns.iter().copied() {
+                            row.col(|ui| match col {
+                                SortColumn::Name => {
+                                    if ui
+                                        .selectable_label(
+                                            detail_item_id == Some(item.id),
+                                            egui::RichText::new(&name).color(name_color),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(item.id);
+                                    }
                                 }
-                                None if loading => {
-                                    ui.label("\u{2026}");
+                                SortColumn::Disciplines => {
+                                    ui.label(&disciplines);
                                 }
-                                None => {
-                                    ui.label("\u{2013}");
+                                SortColumn::ItemId => {
+                                    ui.label(format!("{}", item.id));
+                                }
+                                SortColumn::TotalProfit => {
+                                    ui.label(format!("{}", item.profit));
+                                }
+                                SortColumn::ProfitPerItem => {
+                                    ui.label(format!("{}", item.profit_per_item()));
+                                }
+                                SortColumn::ProfitPerStep => {
+                                    ui.label(format!("{}", item.profit_per_crafting_step()));
+                                }
+                                _ => {
+                                    // velocity columns (units/day)
+                                    let value = v.and_then(|vel| {
+                                        VELOCITY_COLUMNS
+                                            .iter()
+                                            .find(|(c, _, _)| *c == col)
+                                            .and_then(|(_, _, accessor)| accessor(vel))
+                                    });
+                                    match value {
+                                        Some(x) => {
+                                            ui.label(format!("{:.1}", x));
+                                        }
+                                        None if velocity_loading => {
+                                            ui.label("\u{2026}");
+                                        }
+                                        None => {
+                                            ui.label("\u{2013}");
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -1007,7 +1164,10 @@ impl App {
             }
             ui.heading(egui::RichText::new(&item_name).color(name_color));
             if ui
-                .selectable_label(is_favorite, if is_favorite { "★" } else { "☆" })
+                .selectable_label(
+                    is_favorite,
+                    if is_favorite { "\u{2605}" } else { "\u{2606}" },
+                )
                 .clicked()
             {
                 self.toggle_favorite(item_id);

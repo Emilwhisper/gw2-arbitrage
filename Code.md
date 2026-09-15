@@ -120,16 +120,18 @@ New/changed modules:
 - `src/main.rs` — mode switch: **no arguments → GUI** (`gui::run()`); `--cli` or any arguments → console mode (`run_cli()`), unchanged behavior.
 - `src/gui.rs` — egui/eframe 0.27 app:
   - Toolbar: "Run analysis", "Reset cache & re-run", "Export CSV…" (rfd save dialog, same columns as CLI), status/spinner.
-  - List: sortable by profit, per-row icon (lazy download via `icons.rs`, decoded to egui textures, placeholder on failure), ★ favorite toggle (pinned to top), favorites-only filter, discipline multi-filter checkboxes.
+  - List: sortable by clicking any column header (click again to flip direction; favorites stay pinned on top), per-row icon (lazy download via `icons.rs`, decoded to egui textures, placeholder on failure), ★ favorite toggle (pinned to top), favorites-only filter, discipline multi-filter checkboxes, and per-window velocity columns (only the enabled ones are rendered — the table is built dynamically from the enabled set).
   - Detail window on row click: icon, name, favorite toggle, links (GW2 wiki / gw2efficiency / gw2bltc), profit summary (count, sell-at range, money required, breakeven), unknown-recipe warning, shopping-list grid (source: Crafting/TradingPost/Vendor, ingredient, count, min price, total cost).
   - Threading: analysis and item analysis run on background threads with their own tokio runtimes, communicating via `mpsc` events (`Progress`, `AnalysisDone`, `ItemDone`, `IconLoaded`, …); UI repaints while work is pending.
 - `src/velocity.rs` — sell-velocity estimates from the community datawars2.ie TP history API:
-  - `fetch_velocity(item_id) -> Velocity` with per-window units/day: 6h/12h/24h from the hourly endpoint, 7d/2w/1m/3m from the daily endpoint (`start=YYYY-MM-DD`, ISO — unix timestamps do NOT work, verified empirically; multi-ID is not supported either).
+  - `fetch_velocity(item_id, fetch_hourly, fetch_daily) -> Velocity` with per-window units/day: 6h/12h/24h from the hourly endpoint, 7d/2w/1m/3m/6m/1y/2y from the daily endpoint (`start=YYYY-MM-DD` = today − 735 days; ISO — unix timestamps do NOT work, verified empirically; multi-ID is not supported either).
   - Only `sell_sold` counts (actual instant-buy sales); `sell_delisted` cancellations are ignored.
   - Coverage check: a window needs ≥80% of its expected buckets, else it reports `None` (shown as "–" in the GUI).
+  - GUI Settings → "Velocity windows" toggles each window's column (6h…2y, all on by default); the selection is persisted under `velocity_windows` in `gui_prefs.json`. Disabling every hourly (or every daily) window skips that whole endpoint for each item — one request per item per endpoint — while extra windows inside an enabled group cost no additional requests.
+  - Results are merged per endpoint group: `velocity_hourly_done` / `velocity_daily_done` record what was fetched per item, so enabling a window later (Settings) back-fills it without re-running the analysis and without discarding the other group's values.
 - Cargo.toml additions: `eframe 0.27`, `egui_extras 0.27` (TableBuilder for the sortable, resizable, full-width table), `image 0.25` (png only), `rfd 0.12`.
 
-Remaining known gaps (see `todo.md`): count/timegated/ascended options currently only settable at startup (global `CONFIG`); API key setting UI; per-item live price refresh; TP order book display; wallet auto-conversion.
+Remaining known gaps (see `todo.md`): `--count` / `--include-ascended` are still startup-only (global `CONFIG`); TP order book display; wallet auto-conversion; velocity disk-cache + velocity in the detail window; the console window still appears in GUI mode (intentionally kept for now).
 
 - `lib.rs` already exports everything (`pub mod ...`), so a GUI binary can reuse the data loading, crafting cost, and profit functions directly.
 - Coupling points to be aware of:

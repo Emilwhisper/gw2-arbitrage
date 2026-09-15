@@ -24,6 +24,9 @@ pub struct Velocity {
     pub w2: Option<f64>,
     pub m1: Option<f64>,
     pub m3: Option<f64>,
+    pub m6: Option<f64>,
+    pub y1: Option<f64>,
+    pub y2: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -92,86 +95,107 @@ fn iso_date(days_back: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
-/// Fetch sell velocity for one item across all windows. Units: items/day.
-pub async fn fetch_velocity(item_id: u32) -> Result<Velocity, String> {
+/// Fetch sell velocity for one item. Units: items/day.
+/// `fetch_hourly` / `fetch_daily` let the caller skip a whole endpoint when
+/// every window that uses it is disabled in the GUI.
+pub async fn fetch_velocity(
+    item_id: u32,
+    fetch_hourly: bool,
+    fetch_daily: bool,
+) -> Result<Velocity, String> {
     let client = reqwest::Client::new();
     let now = now_unix();
     let mut v = Velocity::default();
 
     // --- hourly buckets: 6h / 12h / 24h windows ---
-    let url = format!("{}/hourly/json?itemID={}", BASE_URL, item_id);
-    let rows: Vec<Bucket> = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    if fetch_hourly {
+        let url = format!("{}/hourly/json?itemID={}", BASE_URL, item_id);
+        let rows: Vec<Bucket> = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
 
-    for (hours, out) in [
-        (6, 0usize),
-        (12, 1),
-        (24, 2),
-    ] {
-        let cutoff = now - hours * 3600;
-        let buckets: Vec<&Bucket> = rows
-            .iter()
-            .filter(|b| parse_epoch(&b.date).is_some_and(|t| t >= cutoff))
-            .collect();
-        if enough_coverage(buckets.len(), hours as usize) {
-            let sum: f64 = buckets.iter().map(|b| b.sell_sold).sum();
-            let value = sum / buckets.len() as f64 * 24.0;
-            match out {
-                0 => v.h6 = Some(value),
-                1 => v.h12 = Some(value),
-                _ => v.h24 = Some(value),
+        for (hours, out) in [
+            (6, 0usize),
+            (12, 1),
+            (24, 2),
+        ] {
+            let cutoff = now - hours * 3600;
+            let buckets: Vec<&Bucket> = rows
+                .iter()
+                .filter(|b| parse_epoch(&b.date).is_some_and(|t| t >= cutoff))
+                .collect();
+            if enough_coverage(buckets.len(), hours as usize) {
+                let sum: f64 = buckets.iter().map(|b| b.sell_sold).sum();
+                let value = sum / buckets.len() as f64 * 24.0;
+                match out {
+                    0 => v.h6 = Some(value),
+                    1 => v.h12 = Some(value),
+                    _ => v.h24 = Some(value),
+                }
             }
         }
     }
 
-    // --- daily buckets: 7d / 2w / 1m / 3m windows ---
-    let url = format!("{}/json?itemID={}&start={}", BASE_URL, item_id, iso_date(95));
-    let rows: Vec<Bucket> = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    // --- daily buckets: 7d / 2w / 1m / 3m / 6m / 1y / 2y windows ---
+    if fetch_daily {
+        let url = format!(
+            "{}/json?itemID={}&start={}",
+            BASE_URL,
+            item_id,
+            iso_date(735)
+        );
+        let rows: Vec<Bucket> = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
 
-    for (days, out) in [
-        (7, 0usize),
-        (14, 1),
-        (30, 2),
-        (90, 3),
-    ] {
-        let cutoff = now - days * 86400;
-        let buckets: Vec<i64> = rows
-            .iter()
-            .filter_map(|b| parse_epoch(&b.date))
-            .filter(|&t| t >= cutoff)
-            .collect();
-        let span_days = buckets.iter().max().and_then(|&max| {
-            buckets
+        for (days, out) in [
+            (7, 0usize),
+            (14, 1),
+            (30, 2),
+            (90, 3),
+            (180, 4),
+            (365, 5),
+            (730, 6),
+        ] {
+            let cutoff = now - days * 86400;
+            let buckets: Vec<i64> = rows
                 .iter()
-                .min()
-                .map(|&min| ((max - min) / 86400 + 1).max(1))
-        });
-        if let Some(span_days) = span_days {
-            if (span_days as f64) >= 0.8 * (days as f64) {
-                let sum: f64 = rows
+                .filter_map(|b| parse_epoch(&b.date))
+                .filter(|&t| t >= cutoff)
+                .collect();
+            let span_days = buckets.iter().max().and_then(|&max| {
+                buckets
                     .iter()
-                    .filter(|b| parse_epoch(&b.date).is_some_and(|t| t >= cutoff))
-                    .map(|b| b.sell_sold)
-                    .sum();
-                let value = sum / span_days as f64;
-                match out {
-                    0 => v.d7 = Some(value),
-                    1 => v.w2 = Some(value),
-                    2 => v.m1 = Some(value),
-                    _ => v.m3 = Some(value),
+                    .min()
+                    .map(|&min| ((max - min) / 86400 + 1).max(1))
+            });
+            if let Some(span_days) = span_days {
+                if (span_days as f64) >= 0.8 * (days as f64) {
+                    let sum: f64 = rows
+                        .iter()
+                        .filter(|b| parse_epoch(&b.date).is_some_and(|t| t >= cutoff))
+                        .map(|b| b.sell_sold)
+                        .sum();
+                    let value = sum / span_days as f64;
+                    match out {
+                        0 => v.d7 = Some(value),
+                        1 => v.w2 = Some(value),
+                        2 => v.m1 = Some(value),
+                        3 => v.m3 = Some(value),
+                        4 => v.m6 = Some(value),
+                        5 => v.y1 = Some(value),
+                        _ => v.y2 = Some(value),
+                    }
                 }
             }
         }
