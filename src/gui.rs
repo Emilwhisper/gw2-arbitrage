@@ -210,6 +210,9 @@ struct App {
     /// human-readable names for the detail's unknown recipes, resolved once
     /// per item open (raw recipe ids are useless in the UI)
     detail_unknown_names: Vec<String>,
+    /// units to craft in the detail window (always reset to 1 on open;
+    /// changed via the Craft input next to Refresh)
+    detail_quantity: u32,
     /// per-item forced acquisition source for the detail tree estimate
     /// (cleared on every new item); the exact panel above is unaffected
     detail_source_overrides: HashMap<u32, RowAction>,
@@ -536,6 +539,7 @@ impl App {
             detail_loading: false,
             detail: None,
             detail_unknown_names: vec![],
+            detail_quantity: 1,
             detail_source_overrides: HashMap::new(),
             show_settings: false,
             show_filters: false,
@@ -636,11 +640,18 @@ impl App {
         self.detail = None;
         self.detail_unknown_names.clear();
         self.detail_source_overrides.clear();
+        // detail views always start at a single unit (see detail_quantity);
+        // the thread captures the value so a later change re-requests
+        let quantity = self.detail_quantity;
         let tx = self.events_sender.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             let result = runtime.block_on(analysis::run_item_analysis(
-                &analysis, item_id, None, refresh,
+                &analysis,
+                item_id,
+                None,
+                refresh,
+                Some(quantity),
             ));
             match result {
                 Ok(data) => {
@@ -2052,6 +2063,8 @@ impl App {
         }
 
         if let Some(item_id) = clicked {
+            // a newly opened item always starts at a single crafted unit
+            self.detail_quantity = 1;
             self.request_item_detail(item_id, false);
         }
         if let Some(item_id) = favorite_toggled {
@@ -2421,13 +2434,44 @@ impl App {
 
         ui.separator();
         let mut refresh_requested = false;
+        let mut quantity_changed = false;
+        // hoist copies out: the closure below cannot borrow through
+        // profitable_item (shared borrow of self.detail) while also writing
+        // self.detail_quantity
+        let requested = self.detail_quantity;
+        let achieved = profitable_item.count;
+        let shortfall = achieved < requested;
+        // staged locally: the closure below must not touch self while the
+        // detail data borrow is live
+        let mut new_quantity: Option<u32> = None;
         ui.horizontal(|ui| {
             if ui.button("Refresh prices").clicked() {
                 refresh_requested = true;
             }
             // NOTE: no spinner here: detail_loading is always false past the
             // early return above; loading feedback is the spinner up there
+            ui.separator();
+            ui.label("Craft:");
+            let mut quantity = requested.max(1);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut quantity)
+                        .speed(1.0)
+                        .clamp_range(1..=1_000_000),
+                )
+                .changed()
+            {
+                new_quantity = Some(quantity.max(1));
+                // listings are unchanged: reuse the disk cache, no download
+                quantity_changed = true;
+            }
+            if shortfall {
+                ui.small(format!("order book too thin past {achieved} units"));
+            }
         });
+        if let Some(quantity) = new_quantity {
+            self.detail_quantity = quantity;
+        }
 
         // Trading post order book (best asks/bids) for the crafted item
         if let Some(book) = order_book {
@@ -2552,6 +2596,8 @@ impl App {
 
         if refresh_requested {
             self.request_item_detail(item_id, true);
+        } else if quantity_changed {
+            self.request_item_detail(item_id, false);
         }
     }
 }

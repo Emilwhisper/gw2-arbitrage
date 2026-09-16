@@ -119,6 +119,7 @@ pub fn profitable_item_list(
                 &tp_listings_map_for_item,
                 None,
                 &CONFIG.crafting,
+                None,
             )
         })
         .collect();
@@ -136,6 +137,8 @@ pub async fn calc_item_profit(
     notify: Option<&dyn Fn(&str)>,
     // when true, bypass the listings cache and fetch fresh prices
     refresh: bool,
+    // exact unit target for detail views (see calculate_crafting_profit)
+    exact_count: Option<u32>,
 ) -> Result<
     (
         Option<ProfitableItem>,
@@ -200,6 +203,7 @@ pub async fn calc_item_profit(
         &tp_listings_map,
         Some(&mut purchased_ingredients),
         &CONFIG.crafting,
+        exact_count,
     );
 
     let required_unknown_recipes: Vec<u32> = if let Some(profitable_item) = &profitable_item {
@@ -240,6 +244,10 @@ pub fn calculate_crafting_profit(
         &mut HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
     >,
     opt: &config::CraftingOptions,
+    // exact unit target for detail views (Some(n) crafts exactly n units even
+    // at a loss, bypassing the threshold and count limit); None keeps the
+    // greedy optimal-count behavior used by list scans
+    exact_count: Option<u32>,
 ) -> Option<ProfitableItem> {
     let mut tp_listings_map: BTreeMap<u32, ItemListings> = tp_listings_map
         .clone()
@@ -287,7 +295,14 @@ pub fn calculate_crafting_profit(
         Some(count_limit as u32)
     };
     loop {
-        if let Some(count) = count_limit {
+        if let Some(target) = exact_count {
+            // detail quantity: craft exactly the requested units (the loop
+            // below adds whole recipe batches, so grouped outputs may
+            // overshoot slightly); explicit choice wins over limits
+            if crafting_count >= target {
+                break;
+            }
+        } else if let Some(count) = count_limit {
             if crafting_count + output_item_count > count {
                 break;
             }
@@ -327,17 +342,22 @@ pub fn calculate_crafting_profit(
             break;
         };
 
-        // Ensure buy_price is larger before subtracting cost for profit
-        if buy_price < crafting_cost + threshold {
-            break;
-        }
-        // In wide (negative-threshold) mode, stop before the running total
-        // breaches the bound: otherwise a mildly profitable top of the book
-        // gets dragged under -1g by its own deep order book, and the item
-        // vanishes from the wide list even though the normal run shows it.
-        // Never fires for threshold >= 0, so normal/CLI runs are unaffected.
-        if threshold < Money::zero() && listing_profit + (buy_price - crafting_cost) < threshold {
-            break;
+        // Ensure buy_price is larger before subtracting cost for profit.
+        // Skipped for exact detail quantities: the user explicitly asked for
+        // N units, so a loss is informative, not a stop condition.
+        if exact_count.is_none() {
+            if buy_price < crafting_cost + threshold {
+                break;
+            }
+            // In wide (negative-threshold) mode, stop before the running total
+            // breaches the bound: otherwise a mildly profitable top of the book
+            // gets dragged under -1g by its own deep order book, and the item
+            // vanishes from the wide list even though the normal run shows it.
+            // Never fires for threshold >= 0, so normal/CLI runs are unaffected.
+            if threshold < Money::zero() && listing_profit + (buy_price - crafting_cost) < threshold
+            {
+                break;
+            }
         }
 
         listing_profit += buy_price - crafting_cost;

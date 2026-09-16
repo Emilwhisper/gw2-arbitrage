@@ -257,6 +257,8 @@ pub async fn run_item_analysis(
     item_id: u32,
     notify: Option<&dyn Fn(&str)>,
     refresh: bool,
+    // exact unit target for detail views (see calculate_crafting_profit)
+    exact_count: Option<u32>,
 ) -> Result<
     (
         Option<profit::ProfitableItem>,
@@ -274,6 +276,7 @@ pub async fn run_item_analysis(
         &analysis.known_recipes,
         notify,
         refresh,
+        exact_count,
     )
     .await
 }

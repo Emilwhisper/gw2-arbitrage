@@ -112,6 +112,7 @@ fn calculate_crafting_profit_agony_infusion_unprofitable_test() {
         &tp_listings_map,
         None,
         &Default::default(),
+        None,
     );
     assert!(profitable_item.is_none());
 }
@@ -186,6 +187,7 @@ fn calculate_crafting_profit_agony_infusion_profitable_test() {
         &tp_listings_map,
         Some(&mut purchased_ingredients),
         &Default::default(),
+        None,
     );
 
     let mut purchased_ingredients = purchased_ingredients.into_iter().collect::<Vec<_>>();
@@ -307,6 +309,7 @@ fn calculate_crafting_profit_with_output_item_count_test() {
         &tp_listings_map,
         None,
         &Default::default(),
+        None,
     );
     assert!(profitable_item.is_none());
 
@@ -318,6 +321,7 @@ fn calculate_crafting_profit_with_output_item_count_test() {
         &tp_listings_map,
         None,
         &Default::default(),
+        None,
     );
     let crafting_cost = Money::from_copper(43 + 90 + 92);
     let mut crafted = HashMap::new();
@@ -357,6 +361,7 @@ fn calculate_crafting_profit_with_output_item_count_test() {
         &tp_listings_map,
         None,
         &Default::default(),
+        None,
     );
     let crafting_cost = Money::from_copper(43 + 45 * 31 + 90 + 92 * 33 + 94 * 30);
     let mut crafted = HashMap::new();
@@ -525,6 +530,7 @@ fn calculate_crafting_profit_unknown_recipe_test() {
         &tp_listings_map(tp_listings),
         Some(&mut purchased_ingredients),
         &Default::default(),
+        None,
     );
 
     assert!(profitable_item.is_some());
@@ -603,6 +609,7 @@ fn calculate_crafting_profit_with_subitem_leftovers() {
         &tp_listings_map,
         Some(&mut purchased_ingredients),
         &Default::default(),
+        None,
     );
     let crafting_cost = Money::from_copper(
         (25 + 30 + 15) // 1
@@ -687,6 +694,87 @@ fn patient_book_methods_test() {
         revenue,
         Money::from_copper(105).trading_post_sale_revenue() * 2
     );
+}
+
+#[test]
+fn calculate_crafting_profit_exact_count_test() {
+    let item_id = 1236;
+
+    let mut items_map = HashMap::new();
+    items_map.insert(1234, Item::mock(1234, "Ingredient 2", 0));
+    items_map.insert(1235, Item::mock(1235, "Ingredient 1", 0));
+    items_map.insert(item_id, Item::mock(item_id, "Main item", 0));
+
+    let mut recipes_map = HashMap::new();
+    recipes_map.insert(
+        item_id,
+        Recipe::mock(
+            7852,
+            item_id,
+            1,
+            [],
+            &[
+                RecipeIngredient {
+                    item_id: 1234,
+                    count: 2,
+                },
+                RecipeIngredient {
+                    item_id: 1235,
+                    count: 1,
+                },
+            ],
+            true,
+        ),
+    );
+
+    // 2 bids at 300 (revenue 255 each), then 10 bids at 200 (revenue 170);
+    // unit cost from asks is 2x100 + 50 = 250, so only the first 2 units pay
+    let tp_listings_map = tp_listings_map(vec![
+        (1234, vec![], vec![(100, 100)]),
+        (1235, vec![], vec![(50, 100)]),
+        (item_id, vec![(300, 2), (200, 10)], vec![]),
+    ]);
+
+    // greedy (None) stops after the 2 profitable units
+    let profitable_item = calculate_crafting_profit(
+        item_id,
+        &recipes_map,
+        &items_map,
+        &tp_listings_map,
+        None,
+        &Default::default(),
+        None,
+    );
+    assert_eq!(profitable_item.as_ref().map(|i| i.count), Some(2));
+
+    // exact 5: the requested loss-making units are included anyway
+    let profitable_item = calculate_crafting_profit(
+        item_id,
+        &recipes_map,
+        &items_map,
+        &tp_listings_map,
+        None,
+        &Default::default(),
+        Some(5),
+    )
+    .expect("exact count must produce a result");
+    assert_eq!(profitable_item.count, 5);
+    assert_eq!(profitable_item.profit, Money::from_copper(2 * 5 - 3 * 80));
+    assert_eq!(profitable_item.crafting_cost, Money::from_copper(5 * 250));
+
+    // exact 50: the book runs dry after 12 units (2x300 + 10x200)
+    let profitable_item = calculate_crafting_profit(
+        item_id,
+        &recipes_map,
+        &items_map,
+        &tp_listings_map,
+        None,
+        &Default::default(),
+        Some(50),
+    )
+    .expect("exact count must produce a result");
+    assert_eq!(profitable_item.count, 12);
+    assert_eq!(profitable_item.profit, Money::from_copper(2 * 5 - 10 * 80));
 }
 
 fn tp_listings_map(

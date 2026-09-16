@@ -103,7 +103,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             required_unknown_recipes,
             recipe_prices,
             _order_book,
-        ) = analysis::run_item_analysis(&analysis, item_id, notify, false).await?;
+        ) = analysis::run_item_analysis(&analysis, item_id, notify, false, None).await?;
         print_profitable_item(
             item_id,
             &profitable_item,
