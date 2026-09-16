@@ -1,5 +1,13 @@
 # Changelog
 
+### v2.3.1
+
+#### Features
+
+* Item window always opens showing a single crafted unit, with per-unit cost and profit lines.
+* Craft quantity picker next to Refresh prices: exact recomputation for any chosen quantity, including at a loss, with a thin-book note on shortfall.
+* Source selector options carry live unit prices (Buy @ ask, Sell @ bid, Craft estimate, Vendor price).
+
 ### v2.3.0
 
 #### Features
