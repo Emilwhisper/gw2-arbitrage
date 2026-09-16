@@ -1,5 +1,18 @@
 # Changelog
 
+### v2.3.0
+
+#### Features
+
+* Instant vs Patient price mode (toolbar dropdown, `--patient` flag): buy at asks/sell at bids, or place orders at bids/asks and wait.
+* Crafting tree in the item window (replaces the flat list): collapsible nodes, per-row Buy/Sell/Craft/Vendor pins with live unit prices, and an estimate panel.
+* Mystic Forge material promotions (all tier upgrades) under their own filter; account-bound forge basics counted as free.
+* Detail window always shows cost-to-make-1 and profit-per-1; links go straight to items; version in the window title.
+
+#### Fixes
+
+* Vendor leftover unit cost, purchase min/max tracking, unknown recipes shown by name, sell-range wording, endless icon repaint, crafting-steps guard.
+
 ### v2.2.1
 
 #### Features
