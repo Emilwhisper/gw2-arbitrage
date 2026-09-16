@@ -147,7 +147,7 @@ pub fn run() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 700.0])
-            .with_title("gw2-arbitrage"),
+            .with_title(format!("gw2-arbitrage {}", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
     eframe::run_native(
@@ -2121,7 +2121,10 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("×{needed} {name}")).color(name_color));
                 if bought_count > 0 {
-                    ui.label(format!("{bought_count} for {bought_total}"));
+                    ui.label(format!(
+                        "{bought_count} for {bought_total} (@ {} each)",
+                        bought_total / bought_count
+                    ));
                 } else if let Some(made) = crafted.get(&item_id) {
                     ui.label(format!("made {made}"));
                 } else {
@@ -2139,9 +2142,16 @@ impl App {
         }
 
         let recipe = recipe.expect("branch checked above");
+        // effective source tag stays visible while collapsed
+        let source_tag = match before {
+            Some(crafting::Source::TradingPost) => "buy",
+            Some(crafting::Source::Crafting) => "craft",
+            Some(crafting::Source::Vendor) => "vendor",
+            None => "?",
+        };
         let header = match crafted.get(&item_id) {
-            Some(made) => format!("{name} (need {needed}, made {made})"),
-            None => format!("{name} (need {needed})"),
+            Some(made) => format!("{name} (need {needed}, made {made}) [{source_tag}]"),
+            None => format!("{name} (need {needed}) [{source_tag}]"),
         };
         egui::CollapsingHeader::new(egui::RichText::new(header).color(name_color))
             .id_source(path.clone())
@@ -2311,6 +2321,15 @@ impl App {
             profitable_item.profit_per_crafting_step().to_copper_value(),
             (profitable_item.profit_on_cost() * 100_f64).round(),
         ));
+        // per single unit (recipes often output groups): always shown, even
+        // for count == 1, so batch totals never need mental division
+        ui.label(format!(
+            "Per item: {} to make, {} profit",
+            Money::from_copper(
+                profitable_item.crafting_cost.to_copper_value() / profitable_item.count as i32
+            ),
+            profitable_item.profit_per_item(),
+        ));
         // max_sell/min_sell are the highest/lowest *bids* filled in instant
         // mode, or the cheapest/highest *asks* in patient mode (see
         // calculate_crafting_profit), not a mixed range: word accordingly
@@ -2471,8 +2490,9 @@ impl App {
                             let revenue = profitable_item.profit + profitable_item.crafting_cost;
                             let profit = revenue - cost;
                             ui.label(format!(
-                                "Cost {}, profit {} ({} / item)",
+                                "Cost {} ({} each), profit {} ({} / item)",
                                 cost,
+                                cost / profitable_item.count,
                                 profit,
                                 profit / profitable_item.count,
                             ));
