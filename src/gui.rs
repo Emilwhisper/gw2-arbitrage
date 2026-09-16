@@ -212,7 +212,7 @@ struct App {
     detail_unknown_names: Vec<String>,
     /// per-item forced acquisition source for the detail tree estimate
     /// (cleared on every new item); the exact panel above is unaffected
-    detail_source_overrides: HashMap<u32, crafting::Source>,
+    detail_source_overrides: HashMap<u32, RowAction>,
     show_settings: bool,
     show_filters: bool,
     /// Draft values edited in the Filters window (persisted on Apply).
@@ -265,6 +265,29 @@ fn wiki_slug(name: &str) -> String {
     url_slug(name, '_')
 }
 
+/// Per-row override action in the crafting tree: how to source (or value)
+/// one item in the override estimate. Buy = acquire at asks (instant),
+/// Sell = value at bids (patient-style for that row), Craft = make it via
+/// recipe, Vendor = vendor/token value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAction {
+    BuyAsk,
+    SellBid,
+    Craft,
+    Vendor,
+}
+
+impl RowAction {
+    fn tag(self) -> &'static str {
+        match self {
+            RowAction::BuyAsk => "buy",
+            RowAction::SellBid => "sell",
+            RowAction::Craft => "craft",
+            RowAction::Vendor => "vendor",
+        }
+    }
+}
+
 /// TP unit price for the estimate: asks when instant, bids when patient.
 /// Returns None when that side of the book is empty.
 fn tp_unit_price(item_id: u32, prices: &HashMap<u32, api::Price>, patient: bool) -> Option<Money> {
@@ -283,37 +306,35 @@ fn vendor_unit_price(item: &Item) -> Option<Money> {
 
 /// Source override selector for one tree row: standalone function (not a
 /// closure) so it can be called from inside other UI closures without
-/// borrow conflicts. Returns the newly picked source when the user changed
-/// it; `current` is the pinned override if any, else the display default.
+/// borrow conflicts. Each available option carries its live unit price, so
+/// there is no ambiguity about which book side it means. Returns the newly
+/// picked action when the user changed it; `current` is the pinned override
+/// if any, else the display default.
 fn source_selector(
     ui: &mut egui::Ui,
     item_id: u32,
-    can_buy: bool,
-    can_craft: bool,
-    can_vendor: bool,
-    current: Option<crafting::Source>,
-) -> Option<crafting::Source> {
+    options: &[(RowAction, Money)],
+    current: Option<RowAction>,
+) -> Option<RowAction> {
+    fn label(action: RowAction, price: Money) -> String {
+        match action {
+            RowAction::BuyAsk => format!("Buy @ {price}"),
+            RowAction::SellBid => format!("Sell @ {price}"),
+            RowAction::Craft => format!("Craft (~{price})"),
+            RowAction::Vendor => format!("Vendor ({price})"),
+        }
+    }
     let mut selected = current;
     egui::ComboBox::from_id_source(format!("override-{item_id}"))
-        .selected_text(match selected {
-            Some(crafting::Source::TradingPost) => "Buy (TP)",
-            Some(crafting::Source::Crafting) => "Craft",
-            Some(crafting::Source::Vendor) => "Vendor",
-            None => "—",
-        })
+        .selected_text(
+            current
+                .and_then(|c| options.iter().find(|(a, _)| *a == c))
+                .map(|(a, m)| label(*a, *m))
+                .unwrap_or_else(|| "—".to_string()),
+        )
         .show_ui(ui, |ui| {
-            if can_buy {
-                ui.selectable_value(
-                    &mut selected,
-                    Some(crafting::Source::TradingPost),
-                    "Buy (TP)",
-                );
-            }
-            if can_craft {
-                ui.selectable_value(&mut selected, Some(crafting::Source::Crafting), "Craft");
-            }
-            if can_vendor {
-                ui.selectable_value(&mut selected, Some(crafting::Source::Vendor), "Vendor");
+            for (action, price) in options {
+                ui.selectable_value(&mut selected, Some(*action), label(*action, *price));
             }
         });
     if selected != current {
@@ -332,22 +353,25 @@ fn source_selector(
 fn estimate_override_cost(
     item_id: u32,
     count: u32,
-    overrides: &HashMap<u32, crafting::Source>,
+    overrides: &HashMap<u32, RowAction>,
     analysis: &Analysis,
     prices: &HashMap<u32, api::Price>,
     patient: bool,
 ) -> Option<Money> {
+    // explicit per-row pins use their own side; unpinned rows fall back to
+    // the global price mode
+    let ask = || tp_unit_price(item_id, prices, false).map(|u| u * count);
+    let bid = || tp_unit_price(item_id, prices, true).map(|u| u * count);
     if let Some(&forced) = overrides.get(&item_id) {
         return match forced {
-            crafting::Source::TradingPost => {
-                tp_unit_price(item_id, prices, patient).map(|u| u * count)
-            }
-            crafting::Source::Vendor => analysis
+            RowAction::BuyAsk => ask(),
+            RowAction::SellBid => bid(),
+            RowAction::Vendor => analysis
                 .items_map
                 .get(&item_id)
                 .and_then(vendor_unit_price)
                 .map(|u| u * count),
-            crafting::Source::Crafting => {
+            RowAction::Craft => {
                 estimate_craft_cost(item_id, count, overrides, analysis, prices, patient)
             }
         };
@@ -380,7 +404,7 @@ fn estimate_override_cost(
 fn estimate_craft_cost(
     item_id: u32,
     count: u32,
-    overrides: &HashMap<u32, crafting::Source>,
+    overrides: &HashMap<u32, RowAction>,
     analysis: &Analysis,
     prices: &HashMap<u32, api::Price>,
     patient: bool,
@@ -2052,7 +2076,7 @@ impl App {
         prices: Option<&HashMap<u32, api::Price>>,
         purchased: &HashMap<(u32, crafting::Source), crafting::PurchasedIngredient>,
         crafted: &HashMap<u32, u32>,
-        overrides: &mut HashMap<u32, crafting::Source>,
+        overrides: &mut HashMap<u32, RowAction>,
         item_id: u32,
         needed: u32,
         path: String,
@@ -2070,21 +2094,37 @@ impl App {
             .unwrap_or(egui::Color32::PLACEHOLDER);
         let recipe = analysis.recipes_map.get(&item_id);
 
-        // per-source availability for the selector
+        // whether a Craft option can be offered at all
         let can_craft = recipe.is_some();
-        let can_vendor = analysis
-            .items_map
-            .get(&item_id)
-            .is_some_and(|item| item.vendor_cost().is_some() || item.token_value().is_some());
-        let can_buy = prices
-            .and_then(|prices| prices.get(&item_id))
-            .is_some_and(|price| {
-                if patient {
-                    price.buys.quantity > 0
-                } else {
-                    price.sells.quantity > 0
+        // priced options for the selector: each available action with its
+        // live unit price (craft is estimated for a single unit)
+        let mut options: Vec<(RowAction, Money)> = vec![];
+        if let Some(prices) = prices {
+            if let Some(price) = prices.get(&item_id) {
+                if price.sells.quantity > 0 {
+                    options.push((
+                        RowAction::BuyAsk,
+                        Money::from_copper(price.sells.unit_price as i32),
+                    ));
                 }
-            });
+                if price.buys.quantity > 0 {
+                    options.push((
+                        RowAction::SellBid,
+                        Money::from_copper(price.buys.unit_price as i32),
+                    ));
+                }
+            }
+            if can_craft {
+                if let Some(cost) =
+                    estimate_craft_cost(item_id, 1, overrides, analysis, prices, patient)
+                {
+                    options.push((RowAction::Craft, cost));
+                }
+            }
+            if let Some(cost) = analysis.items_map.get(&item_id).and_then(vendor_unit_price) {
+                options.push((RowAction::Vendor, cost));
+            }
+        }
 
         // original exact rows for this id, dominant source first
         let mut original: Vec<(crafting::Source, &crafting::PurchasedIngredient)> = purchased
@@ -2099,19 +2139,25 @@ impl App {
             .map(|(_, ing)| ing.total_cost)
             .fold(Money::default(), |a, b| a + b);
 
-        // selector state: pinned override, else the dominant original source,
-        // else the first available option
+        // selector state: pinned override, else the dominant original source
+        // (mapped to the global price mode), else the first available option
         let display_default = original
             .first()
-            .map(|(source, _)| *source)
+            .map(|(source, _)| match source {
+                crafting::Source::TradingPost => {
+                    if patient {
+                        RowAction::SellBid
+                    } else {
+                        RowAction::BuyAsk
+                    }
+                }
+                crafting::Source::Crafting => RowAction::Craft,
+                crafting::Source::Vendor => RowAction::Vendor,
+            })
             .or(if can_craft {
-                Some(crafting::Source::Crafting)
-            } else if can_buy {
-                Some(crafting::Source::TradingPost)
-            } else if can_vendor {
-                Some(crafting::Source::Vendor)
+                Some(RowAction::Craft)
             } else {
-                None
+                options.first().map(|(a, _)| *a)
             });
         let before = overrides.get(&item_id).copied().or(display_default);
 
@@ -2132,10 +2178,8 @@ impl App {
                 }
                 if prices.is_none() {
                     ui.small("snapshot unavailable");
-                } else if let Some(source) =
-                    source_selector(ui, item_id, can_buy, can_craft, can_vendor, before)
-                {
-                    overrides.insert(item_id, source);
+                } else if let Some(action) = source_selector(ui, item_id, &options, before) {
+                    overrides.insert(item_id, action);
                 }
             });
             return;
@@ -2144,9 +2188,7 @@ impl App {
         let recipe = recipe.expect("branch checked above");
         // effective source tag stays visible while collapsed
         let source_tag = match before {
-            Some(crafting::Source::TradingPost) => "buy",
-            Some(crafting::Source::Crafting) => "craft",
-            Some(crafting::Source::Vendor) => "vendor",
+            Some(action) => action.tag(),
             None => "?",
         };
         let header = match crafted.get(&item_id) {
@@ -2161,10 +2203,8 @@ impl App {
                     ui.small("Source for this subtree:");
                     if prices.is_none() {
                         ui.small("snapshot unavailable");
-                    } else if let Some(source) =
-                        source_selector(ui, item_id, can_buy, can_craft, can_vendor, before)
-                    {
-                        overrides.insert(item_id, source);
+                    } else if let Some(action) = source_selector(ui, item_id, &options, before) {
+                        overrides.insert(item_id, action);
                     }
                 });
                 let crafts = needed.div_ceil(recipe.output_item_count);
