@@ -75,6 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         win_console::attach_or_alloc();
     }
 
+    // Hand the real arguments to the lazy `CONFIG` global before anything reads
+    // it: see `config::init_argv`. Without this the global would not parse any
+    // options (and, if it did parse on its own, a foreign argv could kill us).
+    config::init_argv(std::env::args_os());
+
     // GUI mode when launched with no arguments (double-click on Windows);
     // CLI mode with `--cli` or any other arguments.
     if std::env::args().count() == 1 && !CONFIG.cli {

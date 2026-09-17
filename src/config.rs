@@ -1,5 +1,6 @@
 use num_rational::Rational32;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -7,6 +8,7 @@ use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use once_cell::sync::Lazy;
@@ -94,11 +96,32 @@ lazy_static! {
     pub static ref CONFIG: Config = Config::new();
 }
 
+/// The command line `Config::new` should parse. `main` seeds it from the real
+/// argv before anything touches `CONFIG`; processes that never seed it (test
+/// binaries, library embedders) get the CLI defaults instead of crashing on
+/// foreign harness arguments such as `--test-threads=1` or `--nocapture`.
+static ARGV: OnceLock<Vec<OsString>> = OnceLock::new();
+
+/// Seed the arguments the lazy `CONFIG` global will parse. Only the first call
+/// wins: the real argv must never be replaced by a later, accidental seed.
+pub fn init_argv<I>(args: I)
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let _ = ARGV.set(Vec::from_iter(args));
+}
+
 impl Config {
     fn new() -> Self {
         let mut config = Config::default();
 
-        let opt = Opt::from_args();
+        // Parse an explicitly seeded argv when there is one (the binary's
+        // `main`), else the empty command line. `from_iter_safe` + `exit()`
+        // reproduce the exact behavior of the former `Opt::from_args()`
+        // (`--help`, `--version` and parse errors print and exit), without
+        // ever reading `std::env::args` implicitly.
+        let argv = ARGV.get().map(Vec::as_slice).unwrap_or(&[]);
+        let opt = Opt::from_iter_safe(argv.iter().cloned()).unwrap_or_else(|e| e.exit());
 
         config.crafting.include_timegated = opt.include_timegated;
         config.crafting.threshold = opt.threshold;
