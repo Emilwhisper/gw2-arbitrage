@@ -1,6 +1,6 @@
 use gw2_arbitrage::{
     api::{self, ItemListings, Listing, RecipeIngredient},
-    config::Discipline,
+    config::{self, Discipline},
     crafting::{self, CraftedItems, PurchasedIngredient},
     item::Item,
     money::Money,
@@ -9,6 +9,45 @@ use gw2_arbitrage::{
 };
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+
+/// Pin the process-global crafting options that the profit pipeline reads.
+///
+/// They are atomics initialised from the developer's saved `gw2-arbitrage.toml`
+/// (the GUI writes its settings there), so a saved `count`, `include_timegated`
+/// or `include_ascended` would otherwise change these tests' outcomes — which is
+/// exactly how `calculate_crafting_profit_with_output_item_count_test` used to
+/// fail on a machine with `count = 1` saved.
+///
+/// Reading `CONFIG` first forces that file to load, because the lazy global
+/// would overwrite the stores below whenever it initialises.
+fn pin_live_options() {
+    let _ = &gw2_arbitrage::config::CONFIG.cache_dir;
+    config::PROFIT_THRESHOLD.store(0, Ordering::Relaxed);
+    config::COUNT_LIMIT.store(-1, Ordering::Relaxed);
+    config::PRICE_PATIENT.store(false, Ordering::Relaxed);
+    config::INCLUDE_TIMEGATED.store(false, Ordering::Relaxed);
+    config::INCLUDE_ASCENDED.store(false, Ordering::Relaxed);
+}
+
+/// The Mystic Forge promotion legs must not be free: the binding agent is
+/// valued at one Bottle of Elonian Wine, the cheapest coin cost it replaces.
+#[test]
+fn forge_material_promotion_legs_are_priced() {
+    let agent = Item::mock(39125, "Mystic Binding Agent", 0);
+    let crystal = Item::mock(20799, "Mystic Crystal", 0);
+
+    assert_eq!(
+        agent.token_value().map(|cost| cost.to_copper_value()),
+        Some(2504)
+    );
+    // the crystal is still counted as free (bought with laurels / spirit
+    // shards, currencies this tool does not model)
+    assert_eq!(
+        crystal.token_value().map(|cost| cost.to_copper_value()),
+        Some(0)
+    );
+}
 
 trait MockItem {
     fn mock(id: u32, name: &str, vendor_value: u32) -> Self;
@@ -98,6 +137,7 @@ fn calc_revenue(buys: Vec<(u32, u32)>) -> Money {
 
 #[test]
 fn calculate_crafting_profit_agony_infusion_unprofitable_test() {
+    pin_live_options();
     let data::TestData {
         item_id,
         items_map,
@@ -119,6 +159,7 @@ fn calculate_crafting_profit_agony_infusion_unprofitable_test() {
 
 #[test]
 fn calculate_crafting_profit_agony_infusion_profitable_test() {
+    pin_live_options();
     let data::TestData {
         items_map,
         recipes_map,
@@ -266,6 +307,7 @@ fn calculate_crafting_profit_agony_infusion_profitable_test() {
 
 #[test]
 fn calculate_crafting_profit_with_output_item_count_test() {
+    pin_live_options();
     let item_id = 1236;
 
     let mut items_map = HashMap::new();
@@ -388,6 +430,7 @@ fn calculate_crafting_profit_with_output_item_count_test() {
 
 #[test]
 fn calculate_crafting_profit_unknown_recipe_test() {
+    pin_live_options();
     struct TestItem {
         name: String,
         id: u32,
@@ -552,6 +595,7 @@ fn calculate_crafting_profit_unknown_recipe_test() {
 
 #[test]
 fn calculate_crafting_profit_with_subitem_leftovers() {
+    pin_live_options();
     let mut items_map = HashMap::new();
     items_map.insert(1000, Item::mock(1000, "Output Item", 0));
     items_map.insert(2000, Item::mock(2000, "Ingredient 1", 0));
@@ -698,6 +742,7 @@ fn patient_book_methods_test() {
 
 #[test]
 fn calculate_crafting_profit_exact_count_test() {
+    pin_live_options();
     let item_id = 1236;
 
     let mut items_map = HashMap::new();
