@@ -1,5 +1,12 @@
 # Changelog
 
+### v2.3.5
+
+#### Features
+
+* Count limit defaults to 1 craft on first load (lists show one-craft economics out of the box; `--count 0` means no limit).
+* Min-profit filter compares profit per craft instead of per item.
+
 ### v2.3.4
 
 #### Fixes
