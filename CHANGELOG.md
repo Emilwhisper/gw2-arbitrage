@@ -1,12 +1,17 @@
 # Changelog
 
-### Unreleased
+### v2.3.2
 
 #### Fixes
 
 * The detail filter "Min profit (per item, copper)" is now applied to the profit of one crafted unit instead of the batch total, so a large `--count` can no longer pass a threshold that the unit margin fails.
 * A genuinely zero cost no longer renders as an empty string in the item window (it used to print `1 for  (@  each)` in the crafting tree); zero money prints as `0c`.
 * Mystic Forge material promotions price the Mystic Binding Agent at one Bottle of Elonian Wine (2504c) rather than free, so their profits are no longer overstated.
+* Crafting-tree leaf rows show the real vendor/token amount for vendor-bought ingredients (the purchase plan books them at zero because the price is charged in the crafting-cost recursion), so rows no longer display a misleading `0c`.
+* The lazy config global no longer reads `std::env::args` implicitly: the binary seeds it explicitly, so `cargo test -- <filter>`, `--nocapture` and `--test-threads=1` work instead of crashing the test binary.
+* Cache flushing only deletes `cache_`-prefixed names (a non-UTF-8 name used to be deleted anyway) and falls back to the modification time when the filesystem has no birth times.
+* Order-book reservation counters use saturating decrements with debug asserts, so a future imbalance cannot wrap a `u32` and silently poison the liquidity simulation in release builds.
+* The test suite is isolated from the developer's saved config file, and a regression test pins the Mystic Forge leg pricing.
 
 ### v2.3.1
 
