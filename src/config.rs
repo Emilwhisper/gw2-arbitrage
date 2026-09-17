@@ -180,10 +180,17 @@ impl Config {
         INCLUDE_ASCENDED.store(config.ascended.is_some(), Ordering::Relaxed);
         ASCENDED_VALUE.store(config.ascended.unwrap_or(0) as i64, Ordering::Relaxed);
 
-        // count limit: CLI option, else the saved config-file value
+        // count limit: CLI option, else the saved config-file value, else a
+        // single craft (lists show one-craft economics out of the box).
+        // A zero value means unlimited (the atomic uses -1 for that).
         let count = opt.count.or(file.count);
         config.crafting.count = count;
-        COUNT_LIMIT.store(count.map(i64::from).unwrap_or(-1), Ordering::Relaxed);
+        let limit = match count {
+            Some(0) => -1,
+            Some(n) => i64::from(n),
+            None => 1,
+        };
+        COUNT_LIMIT.store(limit, Ordering::Relaxed);
 
         config.karma = if let Some(value) = opt.karma {
             Rational32::approximate_float(value)
@@ -334,6 +341,7 @@ struct Opt {
     item_id: Option<u32>,
 
     /// Limit the number of crafts (batches, not output units) per recipe
+    /// (default 1, 0 means no limit)
     #[structopt(short, long)]
     count: Option<u32>,
 
@@ -424,7 +432,7 @@ static CONFIG_FILE_HELP: Lazy<String> = Lazy::new(|| {
     lang = "<lang>"
     include_timegated = <true|false>
     include_ascended = <true|false>
-    count = <max items produced per recipe>
+    count = <max crafts per recipe, 0 means no limit>
 
     [currencies]
     ascended = <opportunity cost per item>
