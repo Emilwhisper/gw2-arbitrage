@@ -528,7 +528,9 @@ fn get_discipline<Discipline: FromStr + VariantNames>(
 
 fn ensure_dir(dir: &PathBuf) -> Result<&PathBuf, Box<dyn std::error::Error>> {
     if !dir.exists() {
-        std::fs::create_dir(&dir)
+        // create_dir_all: a custom --cache-dir/--data-dir whose parents do not
+        // exist yet must not abort startup
+        std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create '{}' ({})", dir.display(), e).into())
             .and(Ok(dir))
     } else {
@@ -557,21 +559,29 @@ fn flush_cache(cache_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let expired = SystemTime::now() - Duration::new(300, 0);
     for file in fs::read_dir(&cache_dir)? {
         let file = file?;
-        let filename = file.file_name().into_string();
-        if let Ok(name) = filename {
-            if !name.starts_with(CACHE_PREFIX) {
-                continue;
-            }
+        // Only `cache_*` files are ours. A name that is not valid UTF-8 is never
+        // ours either: the previous `if let Ok(name)` silently fell through to
+        // the deletion path for it, which could remove an unrelated file.
+        if !is_cache_file_name(file.file_name()) {
+            continue;
         }
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             continue;
         }
-        if metadata.created()? <= expired {
+        // `created()` is not supported by every filesystem, and `?` on it used
+        // to abort the whole flush: fall back to the modification time.
+        let age = metadata.created().or_else(|_| metadata.modified())?;
+        if age <= expired {
             fs::remove_file(file.path())?;
         }
     }
     Ok(())
+}
+
+/// Whether a directory entry name belongs to the 5-minute URL cache.
+fn is_cache_file_name(name: std::ffi::OsString) -> bool {
+    matches!(name.into_string(), Ok(name) if name.starts_with(CACHE_PREFIX))
 }
 
 fn data_dir(dir: &Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -613,4 +623,63 @@ fn config_file(file: &Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Er
             Some(path)
         })
         .ok_or_else(|| "Failed to access current working directory".into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `flush_cache` must only ever consider `cache_*` names for deletion. The
+    /// old `if let Ok(name)` silently fell through to the deletion path when the
+    /// name was not valid UTF-8, so this pins the classification.
+    #[test]
+    fn cache_file_names_are_recognised() {
+        assert!(is_cache_file_name(std::ffi::OsString::from(
+            "cache_1234567890"
+        )));
+        assert!(!is_cache_file_name(std::ffi::OsString::from(
+            "gui_prefs.json"
+        )));
+        assert!(!is_cache_file_name(std::ffi::OsString::from(
+            "favorites.json"
+        )));
+        assert!(!is_cache_file_name(std::ffi::OsString::from("")));
+    }
+
+    /// A name that is not valid UTF-8 (possible on Windows via an unpaired
+    /// surrogate) is never one of our cache files.
+    #[cfg(windows)]
+    #[test]
+    fn cache_file_names_reject_invalid_utf8() {
+        use std::os::windows::ffi::OsStringExt;
+        // lone high surrogate: valid as a wide string, not convertible to UTF-8
+        let invalid = std::ffi::OsString::from_wide(&[0x0061, 0xD800]);
+        assert!(invalid.clone().into_string().is_err());
+        assert!(!is_cache_file_name(invalid));
+    }
+
+    /// Fresh `cache_*` files and every non-cache file survive a flush.
+    #[test]
+    fn flush_cache_leaves_other_files_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "gw2-arbitrage-flush-cache-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let cache_file = dir.join(format!("{}deadbeef", CACHE_PREFIX));
+        fs::write(&cache_file, b"cached response").unwrap();
+        let prefs = dir.join("gui_prefs.json");
+        fs::write(&prefs, b"{}").unwrap();
+        let icons = dir.join("icons");
+        fs::create_dir_all(&icons).unwrap();
+
+        flush_cache(&dir).expect("flush_cache failed");
+
+        assert!(cache_file.is_file());
+        assert!(prefs.is_file());
+        assert!(icons.is_dir());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
