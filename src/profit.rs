@@ -96,6 +96,10 @@ pub fn profitable_item_list(
     recipes_map: &HashMap<u32, Recipe>,
     items_map: &HashMap<u32, Item>,
 ) -> Vec<ProfitableItem> {
+    // O(1) membership tests for the debug assertion below: this runs once per
+    // candidate item, and the id list can hold ~20k entries.
+    let request_listing_ids: HashSet<u32> = request_listing_item_ids.iter().copied().collect();
+
     let mut profitable_items: Vec<_> = profitable_item_ids
         .par_iter()
         .filter_map(|item_id| {
@@ -106,7 +110,7 @@ pub fn profitable_item_list(
 
             let mut tp_listings_map_for_item: HashMap<u32, _> = HashMap::new();
             for id in ingredient_ids {
-                debug_assert!(request_listing_item_ids.contains(&id));
+                debug_assert!(request_listing_ids.contains(&id));
                 if let Some(listing) = tp_listings_map.get(&id).cloned() {
                     tp_listings_map_for_item.insert(id, listing);
                 }
@@ -380,9 +384,15 @@ pub fn calculate_crafting_profit(
                     )
                 });
                 if patient {
-                    listing.pending_sell_quantity -= *count;
+                    // saturating: balanced with the add above, so a no-op today,
+                    // but an imbalance must not wrap and poison the simulation
+                    debug_assert!(listing.pending_sell_quantity >= *count);
+                    listing.pending_sell_quantity =
+                        listing.pending_sell_quantity.saturating_sub(*count);
                 } else {
-                    listing.pending_buy_quantity -= *count;
+                    debug_assert!(listing.pending_buy_quantity >= *count);
+                    listing.pending_buy_quantity =
+                        listing.pending_buy_quantity.saturating_sub(*count);
                 }
                 let (cost, min_sell, max_sell) =
                     listing.buy_with_mode(*count, patient).unwrap_or_else(|| {
@@ -502,7 +512,8 @@ impl ItemListings {
         while count > 0 {
             // sells are sorted in descending price
             let remove = if let Some(listing) = self.sells.last_mut() {
-                listing.quantity -= 1;
+                debug_assert!(listing.quantity > 0, "listing with zero quantity");
+                listing.quantity = listing.quantity.saturating_sub(1);
                 count -= 1;
                 if min_sell == 0 {
                     min_sell = listing.unit_price;
@@ -529,7 +540,8 @@ impl ItemListings {
         while count > 0 {
             // buys are sorted in ascending price
             let remove = if let Some(listing) = self.buys.last_mut() {
-                listing.quantity -= 1;
+                debug_assert!(listing.quantity > 0, "listing with zero quantity");
+                listing.quantity = listing.quantity.saturating_sub(1);
                 count -= 1;
                 min_buy = listing.unit_price;
                 revenue +=
@@ -557,7 +569,8 @@ impl ItemListings {
         while count > 0 {
             // buys are sorted in ascending price
             let remove = if let Some(listing) = self.buys.last_mut() {
-                listing.quantity -= 1;
+                debug_assert!(listing.quantity > 0, "listing with zero quantity");
+                listing.quantity = listing.quantity.saturating_sub(1);
                 count -= 1;
                 if min_buy == 0 {
                     min_buy = listing.unit_price;
@@ -586,7 +599,8 @@ impl ItemListings {
         while count > 0 {
             // sells are sorted in descending price
             let remove = if let Some(listing) = self.sells.last_mut() {
-                listing.quantity -= 1;
+                debug_assert!(listing.quantity > 0, "listing with zero quantity");
+                listing.quantity = listing.quantity.saturating_sub(1);
                 count -= 1;
                 max_ask = listing.unit_price;
                 revenue +=

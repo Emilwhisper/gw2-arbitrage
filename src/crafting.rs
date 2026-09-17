@@ -180,7 +180,7 @@ impl CraftedItems {
         let recipe = recipes_map.get(&item_id).unwrap();
         for ingredient in &recipe.ingredients {
             let crafted = self.crafted.get(&ingredient.item_id).unwrap_or(&0);
-            if *crafted <= 0 {
+            if *crafted == 0 {
                 continue;
             }
             // Let each recipe which uses something get full credit for it; then
@@ -374,9 +374,19 @@ pub fn calculate_precise_min_crafting_cost(
             if purchase_source == Source::TradingPost {
                 let listing = tp_listings_map.get_mut(&purchase_id).unwrap();
                 if patient {
-                    listing.pending_sell_quantity -= purchase_quantity;
+                    // saturating: the counters are balanced add/remove pairs, so
+                    // this is a no-op today, but a future imbalance must not wrap
+                    // (release builds have overflow checks off) and poison the
+                    // simulation.
+                    debug_assert!(listing.pending_sell_quantity >= purchase_quantity);
+                    listing.pending_sell_quantity = listing
+                        .pending_sell_quantity
+                        .saturating_sub(purchase_quantity);
                 } else {
-                    listing.pending_buy_quantity -= purchase_quantity;
+                    debug_assert!(listing.pending_buy_quantity >= purchase_quantity);
+                    listing.pending_buy_quantity = listing
+                        .pending_buy_quantity
+                        .saturating_sub(purchase_quantity);
                 }
             }
         }
