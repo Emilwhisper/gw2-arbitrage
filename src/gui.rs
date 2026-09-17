@@ -2195,10 +2195,27 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("×{needed} {name}")).color(name_color));
                 if bought_count > 0 {
-                    ui.label(format!(
-                        "{bought_count} for {bought_total} (@ {} each)",
-                        bought_total / bought_count
-                    ));
+                    // Vendor purchases are booked with a zero total_cost in the
+                    // plan (profit.rs prices only TradingPost batches; the
+                    // vendor price is charged directly in the crafting-cost
+                    // recursion). Re-derive the amount from the vendor/token
+                    // unit price so the tree does not show a misleading 0c; a
+                    // genuinely free vendor good (e.g. Mystic Crystal) still
+                    // shows 0c.
+                    let vendor_unit = analysis.items_map.get(&item_id).and_then(vendor_unit_price);
+                    let total = if bought_total == Money::default() {
+                        vendor_unit.map(|unit| unit * bought_count)
+                    } else {
+                        Some(bought_total)
+                    };
+                    if let Some(total) = total {
+                        ui.label(format!(
+                            "{bought_count} for {total} (@ {} each)",
+                            total / bought_count
+                        ));
+                    } else {
+                        ui.label(format!("{bought_count} for {bought_total}"));
+                    }
                 } else if let Some(made) = crafted.get(&item_id) {
                     ui.label(format!("made {made}"));
                 } else {
