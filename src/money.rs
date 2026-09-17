@@ -170,6 +170,15 @@ impl fmt::Display for Money {
             currencies.push(format!("{} RN", self.rn.to_integer()));
         }
 
+        if currencies.is_empty() {
+            // A genuinely free cost (no copper, karma, UM, VM or RN) used to
+            // render as an empty string, which showed up as e.g.
+            // "1 for  (@  each)" in the GUI crafting tree. Say so explicitly.
+            // NOTE: `Zero::is_zero` only inspects copper, so it cannot be used
+            // to decide this.
+            return write!(f, "0c");
+        }
+
         write!(f, "{}", currencies.join(", "))
     }
 }
@@ -381,5 +390,17 @@ mod tests {
                     .trading_post_sale_revenue();
             assert!(price <= breakeven && breakeven <= price + epsilon);
         }
+    }
+
+    #[test]
+    fn display_of_zero_is_explicit() {
+        // The crafting tree renders "N for X (@ Y each)": a zero cost must not
+        // print as an empty string (it used to, giving "1 for  (@  each)").
+        assert_eq!(Money::default().to_string(), "0c");
+        assert_eq!(Money::from_copper(0).to_string(), "0c");
+        // non-zero rendering is unchanged
+        assert_eq!(Money::from_copper(1234).to_string(), "0.12.34g");
+        assert_eq!(Money::from_karma(35).to_string(), "35 Karma");
+        assert_eq!(Money::new(0, 35, 0, 0, 0).to_string(), "35 Karma");
     }
 }

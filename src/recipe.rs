@@ -477,8 +477,11 @@ impl Recipe {
     /// 2504c bottle of wine), so only the cheaper agent path is listed.
     /// Probabilistic forge recipes (clovers, bulk promotions, lotteries)
     /// are deliberately excluded: the profit math needs fixed outputs.
-    /// Mystic Crystals / Binding Agents are account-bound vendor goods
-    /// counted as free (see Item::token_value), like karma basics.
+    /// Both forge legs are account-bound vendor goods (bought with laurels /
+    /// spirit shards): the Mystic Crystal is counted as free, like karma
+    /// basics, while the Binding Agent is priced at one Bottle of Elonian Wine
+    /// (2504c) - the cheapest coin cost it replaces - so these rows cannot
+    /// overstate their profit (see Item::token_value).
     pub fn mystic_forge_recipes() -> Vec<Recipe> {
         const CRYSTAL: u32 = 20799; // Mystic Crystal
         const AGENT: u32 = 39125; // Mystic Binding Agent

@@ -440,8 +440,10 @@ const MAX_WORKER_THREADS: u32 = 16;
 ///
 /// `min_velocity` is compared against the selected `velocity_window` (a
 /// `VELOCITY_COLUMNS` id such as `"24h"`); `min_profit_pct` against
-/// `profit_on_cost() * 100.0`; `min_profit_copper` against total profit in
-/// copper. `None` means that threshold is inactive.
+/// `profit_on_cost() * 100.0`; `min_profit_copper` against the profit of a
+/// single crafted unit in copper (deliberately not the batch total, so a large
+/// count cannot pass a threshold that its unit margin fails). `None` means that
+/// threshold is inactive.
 #[derive(Debug, Clone)]
 struct FilterValues {
     min_velocity: Option<f64>,
@@ -674,7 +676,12 @@ impl App {
         let tx = self.events_sender.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            // one blocking request at a time: a current-thread runtime avoids
+            // spawning a CPU-count-sized thread pool per visible row icon
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime");
             let path = runtime.block_on(icons::get_icon(item_id, icon_url.as_deref(), None));
             let _ = tx.send(Event::IconLoaded(item_id, path));
             ctx.request_repaint();
@@ -1626,7 +1633,7 @@ impl eframe::App for App {
                     // --- min profit money ---
                     let mut copper_on = self.filter_draft.min_profit_copper.is_some();
                     if ui
-                        .checkbox(&mut copper_on, "Min profit (total, copper)")
+                        .checkbox(&mut copper_on, "Min profit (per item, copper)")
                         .changed()
                     {
                         self.filter_draft.min_profit_copper =
@@ -1778,7 +1785,9 @@ impl App {
         let detail_item_id = self.detail_item_id;
         let sort_column = self.sort_column;
         let sort_desc = self.sort_desc;
-        let velocities = self.velocities.clone();
+        // taken rather than cloned (thousands of entries): put back at the end
+        // of this function, which has no early returns past this point
+        let velocities = std::mem::take(&mut self.velocities);
         let mut items: Vec<&ProfitableItem> = self
             .profitable_items
             .iter()
@@ -1794,7 +1803,9 @@ impl App {
             // extra Filters-window thresholds (only what was Applied counts)
             .filter(|i| {
                 if let Some(min_cu) = self.filter_applied.min_profit_copper {
-                    if i.profit.to_copper_value() < min_cu {
+                    // per crafted unit, not the batch total: a large count must
+                    // not smuggle a row past a threshold its unit margin fails
+                    if i.profit_per_item().to_copper_value() < min_cu {
                         return false;
                     }
                 }
@@ -1805,7 +1816,7 @@ impl App {
                 }
                 if let Some(min_vel) = self.filter_applied.min_velocity {
                     let win = self.filter_applied.velocity_window.as_str();
-                    let value = self.velocities.get(&i.id).and_then(|v| {
+                    let value = velocities.get(&i.id).and_then(|v| {
                         VELOCITY_COLUMNS
                             .iter()
                             .find(|(_, id, _)| *id == win)
@@ -1892,11 +1903,6 @@ impl App {
             .icon_textures
             .iter()
             .map(|(id, tex)| (*id, tex.as_ref().map(|t| t.id())))
-            .collect();
-        let icon_urls: HashMap<u32, Option<String>> = analysis
-            .items_map
-            .iter()
-            .map(|(id, item)| (*id, item.icon.clone()))
             .collect();
 
         // visible columns: non-velocity always; velocity only if enabled
@@ -2071,9 +2077,18 @@ impl App {
             self.toggle_favorite(item_id);
         }
         for item_id in icons_requested {
-            let icon_url = icon_urls.get(&item_id).cloned().flatten();
+            // look the URL up on demand: an id -> icon map for the whole item
+            // database cost ~74k String clones on every frame
+            let icon_url = analysis
+                .items_map
+                .get(&item_id)
+                .and_then(|item| item.icon.clone());
             self.request_icon(ui.ctx(), item_id, icon_url);
         }
+
+        // put the velocity map taken above back: the detail window, which is
+        // rendered after this function, still needs it
+        self.velocities = velocities;
     }
 
     /// One node of the crafting tree: crafted intermediates render as
@@ -2378,9 +2393,8 @@ impl App {
         // for count == 1, so batch totals never need mental division
         ui.label(format!(
             "Per item: {} to make, {} profit",
-            Money::from_copper(
-                profitable_item.crafting_cost.to_copper_value() / profitable_item.count as i32
-            ),
+            // rational division (Money / u32), matching profit_per_item()
+            profitable_item.crafting_cost / profitable_item.count,
             profitable_item.profit_per_item(),
         ));
         // max_sell/min_sell are the highest/lowest *bids* filled in instant

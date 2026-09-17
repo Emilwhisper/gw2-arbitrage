@@ -1,5 +1,13 @@
 # Changelog
 
+### Unreleased
+
+#### Fixes
+
+* The detail filter "Min profit (per item, copper)" is now applied to the profit of one crafted unit instead of the batch total, so a large `--count` can no longer pass a threshold that the unit margin fails.
+* A genuinely zero cost no longer renders as an empty string in the item window (it used to print `1 for  (@  each)` in the crafting tree); zero money prints as `0c`.
+* Mystic Forge material promotions price the Mystic Binding Agent at one Bottle of Elonian Wine (2504c) rather than free, so their profits are no longer overstated.
+
 ### v2.3.1
 
 #### Features

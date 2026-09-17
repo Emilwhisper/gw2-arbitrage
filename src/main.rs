@@ -244,10 +244,16 @@ fn print_profitable_item(
                 }
             }
             crafting::Source::Vendor => {
-                let vendor_cost = items_map
+                // Mirror the cost model: an item without a coin vendor price can
+                // still carry a token value (see `Item::token_value`), which is
+                // how the Mystic Forge legs are priced. Print it instead of
+                // printing nothing at all.
+                let item = items_map
                     .get(ingredient_id)
-                    .unwrap_or_else(|| panic!("Missing item for ingredient {}", ingredient_id))
-                    .vendor_cost();
+                    .unwrap_or_else(|| panic!("Missing item for ingredient {}", ingredient_id));
+                let vendor_cost = item
+                    .vendor_cost()
+                    .or_else(|| item.token_value().map(|cost| (cost, 1)));
                 if let Some((cost, purchase_count)) = vendor_cost {
                     if purchase_count > 1 {
                         format!(

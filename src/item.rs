@@ -38,10 +38,12 @@ impl Item {
 impl From<ApiItem> for Item {
     fn from(item: ApiItem) -> Self {
         let details = match (&item.item_type, item.details) {
-            (Type::Consumable, Some(details)) => Some(Details::Consumable(
-                serde_json::from_value(details)
-                    .unwrap_or_else(|err| panic!("Error parsing API consumable item: {}", err)),
-            )),
+            // A single malformed API entry must not abort the whole run: with
+            // no details the item simply reports no recipe unlocks, which
+            // `Item::recipe_unlocks` already handles (and logs).
+            (Type::Consumable, Some(details)) => serde_json::from_value(details)
+                .ok()
+                .map(Details::Consumable),
             _ => None,
         };
         Item {
@@ -268,10 +270,17 @@ impl Item {
             // LW1
             // 50025 Blade Shard
             50025 => Some(Money::from_copper(0)),
-            // Mystic Forge legs: account-bound vendor goods counted as free
-            // (like karma basics); enables Mystic Forge promotion recipes
+            // Mystic Forge legs: account-bound vendor goods bought with
+            // currencies this tool does not model (laurels / spirit shards),
+            // so they cannot be priced from the API.
             20799 => Some(Money::from_copper(0)), // Mystic Crystal
-            39125 => Some(Money::from_copper(0)), // Mystic Binding Agent
+            // 39125 Mystic Binding Agent: substitutes for Bottle of Elonian
+            // Wine in the batched material promotion recipes, and a single
+            // agent covers a whole batched craft. One wine (2504c, the vendor
+            // price the recipe.rs wine variants pay per craft) is therefore a
+            // conservative stand-in: it can only understate, never overstate,
+            // the profit of those recipes.
+            39125 => Some(Money::from_copper(2504)),
             // 12339 Lime: unpack-only (Limes in Bulk costs 77 karma / 25).
             // Ungated like the other zero-cost entries so it is obtainable
             // without --karma; karma itself counts as free (see
