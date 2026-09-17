@@ -36,9 +36,10 @@ pub static INCLUDE_ASCENDED: AtomicBool = AtomicBool::new(false);
 /// `INCLUDE_ASCENDED` is true).
 pub static ASCENDED_VALUE: AtomicI64 = AtomicI64::new(0);
 
-/// Maximum number of items produced per recipe (`--count`). `-1` means no
-/// limit. Read live by the profit simulation so the GUI can change it without
-/// a restart.
+/// Maximum number of crafting batches (`--count`) per recipe. `-1` means no
+/// limit. Counts crafts, not output units, so `--count 1` still crafts one
+/// full batch of grouped recipes. Read live by the profit simulation so the
+/// GUI can change it without a restart.
 pub static COUNT_LIMIT: AtomicI64 = AtomicI64::new(-1);
 
 /// Global price mode: false = instant (buy materials at sell orders, sell
@@ -332,7 +333,7 @@ struct Opt {
     /// Print a shopping list of ingredients for the given item id
     item_id: Option<u32>,
 
-    /// Limit the maximum number of items produced for a recipe
+    /// Limit the number of crafts (batches, not output units) per recipe
     #[structopt(short, long)]
     count: Option<u32>,
 

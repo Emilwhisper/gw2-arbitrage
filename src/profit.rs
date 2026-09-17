@@ -307,7 +307,10 @@ pub fn calculate_crafting_profit(
                 break;
             }
         } else if let Some(count) = count_limit {
-            if crafting_count + output_item_count > count {
+            // the limit counts crafts (loop iterations), not output units:
+            // a --count 1 run still crafts one full batch, so grouped
+            // recipes (e.g. x5 outputs) show up instead of vanishing
+            if crafting_count / output_item_count >= count {
                 break;
             }
         }

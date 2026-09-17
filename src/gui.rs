@@ -1456,7 +1456,7 @@ impl eframe::App for App {
                     if ui
                         .checkbox(
                             &mut count_enabled,
-                            "Limit the items produced per recipe (--count)",
+                            "Limit the number of crafts per recipe (--count)",
                         )
                         .changed()
                     {
