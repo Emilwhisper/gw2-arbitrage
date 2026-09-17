@@ -1917,6 +1917,11 @@ impl App {
         let mut favorite_toggled: Option<u32> = None;
         let mut icons_requested: Vec<u32> = vec![];
         let mut sort_changed: Option<(SortColumn, bool)> = None;
+        // read before the builder below borrows ui: the body fills exactly
+        // the remaining panel height instead of stopping at the 800px
+        // default scroll height (which left a dead zone below the table in
+        // tall windows)
+        let table_height = ui.available_height();
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -1926,6 +1931,7 @@ impl App {
             // the scrollbar off-screen (columns too wide) or mid-window
             // (columns too narrow). y stays shrunk (today's vertical behavior).
             .auto_shrink([false, true])
+            .max_scroll_height(table_height)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto())
             .column(Column::auto());
