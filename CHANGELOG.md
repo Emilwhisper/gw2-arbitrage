@@ -1,5 +1,11 @@
 # Changelog
 
+### v2.3.3
+
+#### Fixes
+
+* Item table body fills the available panel height instead of stopping at the default 800px scroll height (no more dead zone below the list in tall windows).
+
 ### v2.3.2
 
 #### Fixes
