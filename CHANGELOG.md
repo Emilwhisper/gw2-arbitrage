@@ -1,5 +1,11 @@
 # Changelog
 
+### v2.3.4
+
+#### Fixes
+
+* `--count` limits crafts (batches), not output units: a small limit no longer silently hides grouped recipes (e.g. `--count 1` crafts one full batch).
+
 ### v2.3.3
 
 #### Fixes
