@@ -1633,7 +1633,7 @@ impl eframe::App for App {
                     // --- min profit money ---
                     let mut copper_on = self.filter_draft.min_profit_copper.is_some();
                     if ui
-                        .checkbox(&mut copper_on, "Min profit (per item, copper)")
+                        .checkbox(&mut copper_on, "Min profit (per craft, copper)")
                         .changed()
                     {
                         self.filter_draft.min_profit_copper =
@@ -1803,9 +1803,17 @@ impl App {
             // extra Filters-window thresholds (only what was Applied counts)
             .filter(|i| {
                 if let Some(min_cu) = self.filter_applied.min_profit_copper {
-                    // per crafted unit, not the batch total: a large count must
-                    // not smuggle a row past a threshold its unit margin fails
-                    if i.profit_per_item().to_copper_value() < min_cu {
+                    // per craft (one recipe batch), not per item and not the
+                    // whole multi-craft total: a large count must not smuggle
+                    // a row past a threshold its batch margin fails
+                    let output = analysis
+                        .recipes_map
+                        .get(&i.id)
+                        .map(|r| r.output_item_count)
+                        .unwrap_or(1)
+                        .max(1);
+                    let crafts = (i.count / output).max(1);
+                    if i.profit.to_copper_value() / (crafts as i32) < min_cu {
                         return false;
                     }
                 }
