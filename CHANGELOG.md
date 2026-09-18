@@ -11,6 +11,7 @@
 #### Fixes
 
 * Import the `Zero` trait in `config.rs` for the live currency helper.
+* Filters window stays open on Apply so rates can be tweaked and re-applied repeatedly.
 
 ### v2.3.5
 
