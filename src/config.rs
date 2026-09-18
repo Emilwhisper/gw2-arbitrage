@@ -1,5 +1,5 @@
 use num_rational::Rational32;
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
