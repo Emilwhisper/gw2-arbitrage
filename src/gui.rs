@@ -2087,7 +2087,10 @@ impl eframe::App for App {
                                     "Rates saved: applies to the next analysis run".to_string()
                                 };
                             }
-                            close_filters = true;
+                            // NOTE: Apply deliberately leaves the window open
+                            // (unlike Close/X): rates are repeatable
+                            // tweak-and-apply drafts, and a second Apply with
+                            // no changes is a no-op.
                         }
                         if ui.button("Close").clicked() {
                             // discard edits that were never applied
