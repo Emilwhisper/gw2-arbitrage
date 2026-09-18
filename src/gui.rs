@@ -1703,7 +1703,7 @@ impl eframe::App for App {
                     let mut um_on =
                         crate::config::UM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut um_on, "Enable Unbound Magic (default 10c each)")
+                            .checkbox(&mut um_on, "Enable Unbound Magic (default 3c each)")
                         .changed()
                     {
                         if um_on && self.filter_um_rate <= 0.0 {
@@ -1714,7 +1714,7 @@ impl eframe::App for App {
                     let mut vm_on =
                         crate::config::VM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut vm_on, "Enable Volatile Magic (default 30c each)")
+                            .checkbox(&mut vm_on, "Enable Volatile Magic (default 14c each)")
                         .changed()
                     {
                         if vm_on && self.filter_vm_rate <= 0.0 {
@@ -1725,7 +1725,7 @@ impl eframe::App for App {
                     let mut rn_on =
                         crate::config::RN_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut rn_on, "Enable Research Notes (default 500c each)")
+                            .checkbox(&mut rn_on, "Enable Research Notes (default 250c each)")
                         .changed()
                     {
                         if rn_on && self.filter_rn_rate <= 0.0 {
@@ -1978,6 +1978,25 @@ impl eframe::App for App {
                         }
                         ui.add_space(4.0);
                     }
+                    // rescan row: settings changed since the list was computed
+                    // in a way that can make new items profitable (rate lowered
+                    // / source newly enabled). Rescan runs a full analysis in
+                    // the same mode (normal/wide) to discover the rest.
+                    if self.rates_stale {
+                        ui.horizontal(|ui| {
+                            ui.add_enabled_ui(!self.running, |ui| {
+                                if ui.button("Rescan").clicked() {
+                                    self.spawn_analysis(self.last_threshold);
+                                    close_filters = true;
+                                }
+                            });
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "Rates changed - Rescan needed",
+                            );
+                        });
+                        ui.add_space(4.0);
+                    }
                     ui.add_space(8.0);
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -2107,22 +2126,6 @@ impl App {
         if self.sort_column.is_velocity() && !self.velocity_enabled(self.sort_column) {
             self.sort_column = SortColumn::TotalProfit;
             self.sort_desc = true;
-        }
-        // rescan banner: settings changed since this list was computed in a
-        // way that can make new items profitable (rate lowered / source newly
-        // enabled). The list above is a still-valid subset; Rescan does a full
-        // analysis in the same mode (normal/wide) to discover the rest.
-        if self.rates_stale && !self.running {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "\u{26a0} Rates changed since this scan — newly-profitable items may be missing.",
-                );
-                if ui.button("Rescan now").clicked() {
-                    self.spawn_analysis(self.last_threshold);
-                }
-            });
-            ui.separator();
         }
         // filters
         ui.horizontal(|ui| {

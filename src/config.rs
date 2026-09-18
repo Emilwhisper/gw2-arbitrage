@@ -115,19 +115,11 @@ pub fn rn_value() -> Option<Rational32> {
 }
 
 /// First-enable fallback copper-per-token rates for the GUI currency toggles.
-/// Community estimates, not market data — the Filters window always shows the
-/// active value so it can be tuned:
-/// - UM 10c: Magic-Warped Packets ran ~8c/UM and Bundles ~17c/UM in the 2017
-///   drop-rate research (1k packets / 7k bundles); 10c is the conservative pick
-///   since T6 prices fell further after PoF.
-/// - VM 30c: Trophy Shipments (250 VM + 1g) are the community conversion
-///   benchmark (~17c/VM on fast.farming-community.eu); 30c is conservative.
-/// - RN 500c: no clean conversion exists (RN come from research-salvaging
-///   crafted gear); deliberately conservative placeholder — tune it to your
-///   own craft-salvage cost.
-pub const DEFAULT_UM_VALUE: f64 = 10.0;
-pub const DEFAULT_VM_VALUE: f64 = 30.0;
-pub const DEFAULT_RN_VALUE: f64 = 500.0;
+/// User-configured estimates, not market data — the Filters window always
+/// shows the active value so it can be tuned: UM 3c, VM 14c, RN 250c.
+pub const DEFAULT_UM_VALUE: f64 = 3.0;
+pub const DEFAULT_VM_VALUE: f64 = 14.0;
+pub const DEFAULT_RN_VALUE: f64 = 250.0;
 
 /// Toggle/rate fingerprint captured when a list is computed. Compared against
 /// the live settings to decide whether the profitable universe may have grown

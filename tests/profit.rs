@@ -1610,9 +1610,9 @@ fn currency_gates_are_live() {
 /// visible and editable in the Filters window).
 #[test]
 fn currency_default_rates() {
-    assert_eq!(config::DEFAULT_UM_VALUE, 10.0);
-    assert_eq!(config::DEFAULT_VM_VALUE, 30.0);
-    assert_eq!(config::DEFAULT_RN_VALUE, 500.0);
+    assert_eq!(config::DEFAULT_UM_VALUE, 3.0);
+    assert_eq!(config::DEFAULT_VM_VALUE, 14.0);
+    assert_eq!(config::DEFAULT_RN_VALUE, 250.0);
 }
 
 /// The rescan-banner rule: only changes that can make new items profitable
