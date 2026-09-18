@@ -229,6 +229,12 @@ struct App {
     /// `--count` runtime setting (limit items produced per recipe)
     count_limit_enabled: bool,
     count_limit_input: u32,
+    /// `--um/--vm/--rn` runtime settings: copper-per-token opportunity cost.
+    /// Enabled state lives in the `config::UM/VM/RN_ENABLED` atomics; these
+    /// fields are the editable rate drafts, applied on change.
+    um_rate_input: f64,
+    vm_rate_input: f64,
+    rn_rate_input: f64,
     prefs_dirty: bool,
     /// "Prefetch icons" progress: (done, total); `None` when not running
     prefetch_progress: Option<(usize, usize)>,
@@ -560,6 +566,15 @@ impl App {
                     1
                 }
             },
+            um_rate_input: f64::from_bits(
+                crate::config::UM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            vm_rate_input: f64::from_bits(
+                crate::config::VM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            rn_rate_input: f64::from_bits(
+                crate::config::RN_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             prefs_dirty: false,
             prefetch_progress: None,
             worker_threads: DEFAULT_WORKER_THREADS,
@@ -950,6 +965,99 @@ impl App {
         crate::config::COUNT_LIMIT.store(value, std::sync::atomic::Ordering::Relaxed);
         let toml_value = enabled.then(|| toml::Value::Integer(value));
         self.write_config_key("count", toml_value);
+    }
+
+    /// `--include-charged-quartz`: allow the synthetic Charged Quartz Crystal
+    /// recipe (25x Quartz Crystal). Also requires the timegated toggle, since
+    /// the charge is once per day per account.
+    fn set_include_charged_quartz(&mut self, enabled: bool) {
+        crate::config::INCLUDE_CHARGED_QUARTZ
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.write_config_key(
+            "include_charged_quartz",
+            Some(toml::Value::Boolean(enabled)),
+        );
+    }
+
+    /// `--karma`: karma-gated ingredients count as free; the toggle only gates
+    /// availability. Persisted as `currencies.karma = 1.0` for CLI compat.
+    fn set_karma_enabled(&mut self, enabled: bool) {
+        crate::config::KARMA_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let value = enabled.then(|| toml::Value::Float(1.0));
+        self.write_currency_key("karma", value);
+    }
+
+    /// `--um`: Unbound Magic opportunity cost in copper per token.
+    fn set_um(&mut self, enabled: bool, rate: f64) {
+        let rate = rate.max(0.0);
+        crate::config::UM_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        crate::config::UM_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let value = enabled.then(|| toml::Value::Float(rate));
+        self.write_currency_key("um", value);
+    }
+
+    /// `--vm`: Volatile Magic opportunity cost in copper per token.
+    fn set_vm(&mut self, enabled: bool, rate: f64) {
+        let rate = rate.max(0.0);
+        crate::config::VM_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        crate::config::VM_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let value = enabled.then(|| toml::Value::Float(rate));
+        self.write_currency_key("vm", value);
+    }
+
+    /// `--rn`: Research Note opportunity cost in copper per note.
+    fn set_rn(&mut self, enabled: bool, rate: f64) {
+        let rate = rate.max(0.0);
+        crate::config::RN_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        crate::config::RN_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let value = enabled.then(|| toml::Value::Float(rate));
+        self.write_currency_key("rn", value);
+    }
+
+    /// Write/remove a key inside the TOML `[currencies]` table (used for
+    /// karma/um/vm/rn so the CLI sees the same values). Like
+    /// `write_config_key` this persists immediately; the live atomics mean no
+    /// restart is needed for the next analysis run.
+    fn write_currency_key(&mut self, key: &str, value: Option<toml::Value>) {
+        let path = crate::config::CONFIG.config_file_path.clone();
+        let result = (|| -> Result<(), String> {
+            let mut table: toml::Value = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok())
+                .unwrap_or_else(|| toml::Value::Table(Default::default()));
+            let root = table
+                .as_table_mut()
+                .ok_or_else(|| "config is not a table".to_string())?;
+            if !root.contains_key("currencies") {
+                root.insert(
+                    "currencies".to_string(),
+                    toml::Value::Table(Default::default()),
+                );
+            }
+            let currencies = root
+                .get_mut("currencies")
+                .ok_or_else(|| "[currencies] is missing".to_string())?;
+            let sub = currencies
+                .as_table_mut()
+                .ok_or_else(|| "[currencies] is not a table".to_string())?;
+            match value {
+                Some(v) => {
+                    sub.insert(key.into(), v);
+                }
+                None => {
+                    sub.remove(key);
+                }
+            }
+            let out = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&path, out).map_err(|e| e.to_string())
+        })();
+        self.status = match result {
+            Ok(_) => format!("Saved to {}. Applies to the next analysis run.", path.display()),
+            Err(e) => format!("Failed to save config: {}", e),
+        };
     }
 
     /// Whether a velocity window's column is enabled in the settings.
@@ -1481,6 +1589,112 @@ impl eframe::App for App {
                     ui.small(
                         "Ascended and count settings apply on the next analysis run and are remembered.",
                     );
+                    ui.add_space(8.0);
+                    let mut charged_quartz = crate::config::INCLUDE_CHARGED_QUARTZ
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(
+                            &mut charged_quartz,
+                            "Include Charged Quartz Crystal recipe (25x Quartz Crystal)",
+                        )
+                        .changed()
+                    {
+                        self.set_include_charged_quartz(charged_quartz);
+                    }
+                    ui.small(
+                        "Also requires the timegated toggle above (the charge is once per day). Unlocks celestial-inscription chains such as the Celestial Pearl weapons.",
+                    );
+                    ui.add_space(8.0);
+                    ui.strong("Account currencies");
+                    ui.small(
+                        "Same as the --karma/--um/--vm/--rn console options: gated recipes are excluded while disabled. Rates are copper per token. Apply on the next analysis run and are remembered.",
+                    );
+                    let mut karma = crate::config::KARMA_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut karma, "Enable Karma (counts as free)")
+                        .changed()
+                    {
+                        self.set_karma_enabled(karma);
+                    }
+                    let mut um_on =
+                        crate::config::UM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut um_on, "Enable Unbound Magic")
+                        .changed()
+                    {
+                        let rate = self.um_rate_input;
+                        self.set_um(um_on, rate);
+                    }
+                    if um_on {
+                        ui.horizontal(|ui| {
+                            let mut rate = self.um_rate_input;
+                            ui.label("Copper per Unbound Magic:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut rate)
+                                        .speed(1.0)
+                                        .clamp_range(0.0..=1_000_000.0),
+                                )
+                                .changed()
+                            {
+                                self.um_rate_input = rate.max(0.0);
+                                self.set_um(true, self.um_rate_input);
+                            }
+                        });
+                    }
+                    let mut vm_on =
+                        crate::config::VM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut vm_on, "Enable Volatile Magic")
+                        .changed()
+                    {
+                        let rate = self.vm_rate_input;
+                        self.set_vm(vm_on, rate);
+                    }
+                    if vm_on {
+                        ui.horizontal(|ui| {
+                            let mut rate = self.vm_rate_input;
+                            ui.label("Copper per Volatile Magic:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut rate)
+                                        .speed(1.0)
+                                        .clamp_range(0.0..=1_000_000.0),
+                                )
+                                .changed()
+                            {
+                                self.vm_rate_input = rate.max(0.0);
+                                self.set_vm(true, self.vm_rate_input);
+                            }
+                        });
+                    }
+                    let mut rn_on =
+                        crate::config::RN_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut rn_on, "Enable Research Notes")
+                        .changed()
+                    {
+                        let rate = self.rn_rate_input;
+                        self.set_rn(rn_on, rate);
+                    }
+                    if rn_on {
+                        ui.horizontal(|ui| {
+                            let mut rate = self.rn_rate_input;
+                            ui.label("Copper per Research Note:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut rate)
+                                        .speed(1.0)
+                                        .clamp_range(0.0..=1_000_000.0),
+                                )
+                                .changed()
+                            {
+                                self.rn_rate_input = rate.max(0.0);
+                                self.set_rn(true, self.rn_rate_input);
+                            }
+                        });
+                    }
                     ui.add_space(8.0);
                     ui.strong("Velocity windows");
                     ui.horizontal_wrapped(|ui| {

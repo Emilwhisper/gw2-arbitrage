@@ -85,8 +85,9 @@ impl TryFrom<gw2efficiency::Recipe> for Recipe {
 impl Recipe {
     // see https://wiki.guildwars2.com/wiki/Category:Time_gated_recipes
     // for a list of time gated recipes
-    // I've left Charged Quartz Crystals off the list, since they can
-    // drop from containers.
+    // Charged Quartz Crystals are included: the place-of-power charge is
+    // once per day per account (container drops exist but are not a
+    // reliable bulk source, so the timegate is the conservative model).
     pub fn is_timegated(&self) -> bool {
         self.output_item_id == 46740         // Spool of Silk Weaving Thread
             || self.output_item_id == 46742  // Lump of Mithrillium
@@ -103,6 +104,14 @@ impl Recipe {
             || self.output_item_id == 79795  // Dragon Hatchling Doll Adornments
             || self.output_item_id == 79817  // Dragon Hatchling Doll Frame
             || self.output_item_id == 43772 // Charged Quartz Crystal
+    }
+
+    /// Whether this is the synthetic Charged Quartz Crystal recipe (25x Quartz
+    /// Crystal at a place of power). Gated separately by
+    /// `INCLUDE_CHARGED_QUARTZ` (on top of the timegate) so users can opt out
+    /// of celestial-inscription chains without disabling all timegated recipes.
+    pub fn is_charged_quartz(&self) -> bool {
+        self.output_item_id == 43772
     }
 
     pub fn is_automatic(&self) -> bool {
@@ -464,6 +473,35 @@ impl Recipe {
                         count: 1,
                     },
                 ],
+                source: RecipeSource::Automatic,
+            },
+            // Charged Quartz Crystal (place of power, daily): 25x Quartz
+            // Crystal. Account-bound with no TP listing, so without this
+            // synthetic row every celestial-inscription chain is unpriceable
+            // and silently drops out of the list (e.g. 43849 Celestial Pearl
+            // Handcannon via 43775). Patient-aware for free: the standard
+            // TP-side switch in crafting.rs prices the 43773 leg at asks in
+            // Instant mode and bids in Patient mode. Timegated via
+            // is_timegated() on output 43772, so it only applies when the
+            // user enables timegated recipes.
+            Recipe {
+                id: None,
+                output_item_id: 43772u32,
+                output_item_count: 1,
+                disciplines: vec![
+                    config::Discipline::Armorsmith,
+                    config::Discipline::Artificer,
+                    config::Discipline::Huntsman,
+                    config::Discipline::Jeweler,
+                    config::Discipline::Leatherworker,
+                    config::Discipline::Tailor,
+                    config::Discipline::Weaponsmith,
+                    config::Discipline::Scribe,
+                ],
+                ingredients: vec![api::RecipeIngredient {
+                    item_id: 43773u32, // Quartz Crystal
+                    count: 25,
+                }],
                 source: RecipeSource::Automatic,
             },
         ]

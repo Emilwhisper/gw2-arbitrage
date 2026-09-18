@@ -1,4 +1,5 @@
 use num_rational::Rational32;
+use num_traits::ToPrimitive;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
@@ -7,7 +8,7 @@ use std::io::Read;
 use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
@@ -55,9 +56,68 @@ pub static PRICE_PATIENT: AtomicBool = AtomicBool::new(false);
 /// restart. Initialized from the `--threshold` CLI flag.
 pub static PROFIT_THRESHOLD: AtomicI64 = AtomicI64::new(0);
 
+/// Global toggle for the synthetic Charged Quartz Crystal recipe (25x Quartz
+/// Crystal charged at a place of power, once per day per account).
+/// Read live by the crafting-cost calculations so the GUI can flip it without
+/// a restart. Initialized from the CLI flag or the config file.
+/// Note: the recipe is also timegated (`Recipe::is_timegated`), so both this
+/// and `INCLUDE_TIMEGATED` must be on for celestial-inscription chains
+/// (e.g. item 43849) to appear.
+pub static INCLUDE_CHARGED_QUARTZ: AtomicBool = AtomicBool::new(false);
+
+/// Global toggle for karma-gated ingredients (bulk foods, karma drips).
+/// Karma counts as free in profit math (`Money::copper_value` ignores it);
+/// the flag only gates availability. Read live so the GUI can flip it without
+/// a restart. Initialized from `--karma` or the config file.
+pub static KARMA_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Global toggles + copper-per-token rates for Unbound Magic, Volatile Magic
+/// and Research Notes. Rates are stored as f64 bits; `*_value()` returns
+/// `None` while disabled so gated recipes stay unpriceable (same semantics as
+/// the CLI flags). Read live so the GUI can change them without a restart.
+pub static UM_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static UM_VALUE_BITS: AtomicU64 = AtomicU64::new(0);
+pub static VM_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static VM_VALUE_BITS: AtomicU64 = AtomicU64::new(0);
+pub static RN_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static RN_VALUE_BITS: AtomicU64 = AtomicU64::new(0);
+
+fn rate_from_bits(bits: &AtomicU64) -> Rational32 {
+    Rational32::approximate_float(f64::from_bits(bits.load(Ordering::Relaxed)))
+        .unwrap_or_else(Rational32::zero)
+}
+
+/// Live Unbound Magic rate, or `None` while disabled.
+pub fn um_value() -> Option<Rational32> {
+    if UM_ENABLED.load(Ordering::Relaxed) {
+        Some(rate_from_bits(&UM_VALUE_BITS))
+    } else {
+        None
+    }
+}
+
+/// Live Volatile Magic rate, or `None` while disabled.
+pub fn vm_value() -> Option<Rational32> {
+    if VM_ENABLED.load(Ordering::Relaxed) {
+        Some(rate_from_bits(&VM_VALUE_BITS))
+    } else {
+        None
+    }
+}
+
+/// Live Research Note rate, or `None` while disabled.
+pub fn rn_value() -> Option<Rational32> {
+    if RN_ENABLED.load(Ordering::Relaxed) {
+        Some(rate_from_bits(&RN_VALUE_BITS))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CraftingOptions {
     pub include_timegated: bool,
+    pub include_charged_quartz: bool,
     pub count: Option<u32>,
     pub threshold: Option<u32>,
     pub value: Option<u32>,
@@ -154,6 +214,13 @@ impl Config {
         config.crafting.include_timegated = include_timegated;
         INCLUDE_TIMEGATED.store(include_timegated, Ordering::Relaxed);
 
+        // charged quartz flag: CLI flag OR saved config-file setting.
+        // The recipe itself is also timegated, so both must be on.
+        let include_charged_quartz =
+            opt.include_charged_quartz || file.include_charged_quartz.unwrap_or(false);
+        config.crafting.include_charged_quartz = include_charged_quartz;
+        INCLUDE_CHARGED_QUARTZ.store(include_charged_quartz, Ordering::Relaxed);
+
         config.lang = if let Some(_) = opt.lang {
             opt.lang
         } else if let Some(code) = file.lang {
@@ -223,6 +290,37 @@ impl Config {
         } else {
             None
         };
+
+        // Seed the live currency atomics from the same sources so CLI and GUI
+        // agree at startup; the GUI then flips them without a restart.
+        KARMA_ENABLED.store(config.karma.is_some(), Ordering::Relaxed);
+        UM_ENABLED.store(config.um.is_some(), Ordering::Relaxed);
+        UM_VALUE_BITS.store(
+            config
+                .um
+                .and_then(|r| r.to_f64())
+                .unwrap_or(0.0)
+                .to_bits(),
+            Ordering::Relaxed,
+        );
+        VM_ENABLED.store(config.vm.is_some(), Ordering::Relaxed);
+        VM_VALUE_BITS.store(
+            config
+                .vm
+                .and_then(|r| r.to_f64())
+                .unwrap_or(0.0)
+                .to_bits(),
+            Ordering::Relaxed,
+        );
+        RN_ENABLED.store(config.rn.is_some(), Ordering::Relaxed);
+        RN_VALUE_BITS.store(
+            config
+                .rn
+                .and_then(|r| r.to_f64())
+                .unwrap_or(0.0)
+                .to_bits(),
+            Ordering::Relaxed,
+        );
 
         if let Some(blacklists) = file.blacklist {
             config.item_blacklist = blacklists.items.map(HashSet::from_iter);
@@ -308,6 +406,7 @@ struct ConfigFile {
     api_key: Option<String>,
     lang: Option<String>,
     include_timegated: Option<bool>,
+    include_charged_quartz: Option<bool>,
     include_ascended: Option<bool>,
     count: Option<u32>,
     currencies: Option<ConfigFileCurrencySection>,
@@ -332,6 +431,12 @@ struct Opt {
     /// Include timegated recipes such as Deldrimor Steel Ingot
     #[structopt(short = "t", long)]
     include_timegated: bool,
+
+    /// Include the synthetic Charged Quartz Crystal recipe (25x Quartz
+    /// Crystal, charged at a place of power). Also requires --include-timegated,
+    /// since the charge is once per day per account.
+    #[structopt(long)]
+    include_charged_quartz: bool,
 
     /// Output the full list of profitable recipes to this CSV file
     #[structopt(short, long, parse(from_os_str))]
@@ -431,6 +536,7 @@ static CONFIG_FILE_HELP: Lazy<String> = Lazy::new(|| {
     api_key = "<key-with-unlocks-scope>"
     lang = "<lang>"
     include_timegated = <true|false>
+    include_charged_quartz = <true|false>
     include_ascended = <true|false>
     count = <max crafts per recipe, 0 means no limit>
 

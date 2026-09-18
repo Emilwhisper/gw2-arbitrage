@@ -28,6 +28,11 @@ fn pin_live_options() {
     config::PRICE_PATIENT.store(false, Ordering::Relaxed);
     config::INCLUDE_TIMEGATED.store(false, Ordering::Relaxed);
     config::INCLUDE_ASCENDED.store(false, Ordering::Relaxed);
+    config::INCLUDE_CHARGED_QUARTZ.store(false, Ordering::Relaxed);
+    config::KARMA_ENABLED.store(false, Ordering::Relaxed);
+    config::UM_ENABLED.store(false, Ordering::Relaxed);
+    config::VM_ENABLED.store(false, Ordering::Relaxed);
+    config::RN_ENABLED.store(false, Ordering::Relaxed);
 }
 
 /// The Mystic Forge promotion legs must not be free: the binding agent is
@@ -1472,4 +1477,131 @@ mod data {
             tp_listings_map,
         }
     }
+}
+
+/// The synthetic Charged Quartz Crystal recipe must exist: 25x Quartz Crystal,
+/// and it must be gated behind both the timegate (daily charge) and the
+/// dedicated charged-quartz toggle.
+#[test]
+fn charged_quartz_synthetic_recipe_shape() {
+    pin_live_options();
+    let recipes = Recipe::additional_recipes();
+    let quartz = recipes
+        .iter()
+        .find(|r| r.output_item_id == 43772)
+        .expect("missing 43772 Charged Quartz recipe");
+    assert_eq!(quartz.output_item_count, 1);
+    assert_eq!(quartz.ingredients.len(), 1);
+    assert_eq!(quartz.ingredients[0].item_id, 43773);
+    assert_eq!(quartz.ingredients[0].count, 25);
+    assert!(quartz.is_timegated());
+    assert!(quartz.is_charged_quartz());
+}
+
+/// A parent chain through Charged Quartz is only priceable while both
+/// INCLUDE_TIMEGATED and INCLUDE_CHARGED_QUARTZ are on; the quartz leg costs
+/// 25x the Quartz Crystal TP price (instant mode reads the asks).
+#[test]
+fn charged_quartz_estimated_cost_gating() {
+    pin_live_options();
+    let mut items_map = HashMap::new();
+    items_map.insert(43773, Item::mock(43773, "Quartz Crystal", 20));
+    items_map.insert(43772, Item::mock(43772, "Charged Quartz Crystal", 50));
+    items_map.insert(90001, Item::mock(90001, "Test Widget", 0));
+
+    let mut recipes_map = HashMap::new();
+    for r in Recipe::additional_recipes() {
+        recipes_map.insert(r.output_item_id, r);
+    }
+    recipes_map.insert(
+        90001,
+        Recipe::mock(
+            90001,
+            90001,
+            1,
+            [Discipline::Huntsman],
+            &[RecipeIngredient {
+                item_id: 43772,
+                count: 2,
+            }],
+            true,
+        ),
+    );
+
+    let mut prices = HashMap::new();
+    prices.insert(
+        43773,
+        api::Price {
+            id: 43773,
+            buys: api::PriceInfo {
+                unit_price: 22,
+                quantity: 10,
+            },
+            sells: api::PriceInfo {
+                unit_price: 24,
+                quantity: 10,
+            },
+        },
+    );
+
+    let opt = Default::default();
+    let estimate = || {
+        crafting::calculate_estimated_min_crafting_cost(
+            90001,
+            &recipes_map,
+            &items_map,
+            &prices,
+            &opt,
+        )
+    };
+
+    // both toggles off: the whole chain is unpriceable (old behavior)
+    assert!(estimate().is_none());
+    // timegated on but quartz off: still unpriceable
+    config::INCLUDE_TIMEGATED.store(true, Ordering::Relaxed);
+    assert!(estimate().is_none());
+    // both on: 2 x (25 x 24c ask) = 1200c
+    config::INCLUDE_CHARGED_QUARTZ.store(true, Ordering::Relaxed);
+    let cost = estimate().expect("quartz chain should be priceable");
+    assert_eq!(cost.cost.to_copper_value(), 2 * 25 * 24);
+    // restore pinned defaults
+    config::INCLUDE_TIMEGATED.store(false, Ordering::Relaxed);
+    config::INCLUDE_CHARGED_QUARTZ.store(false, Ordering::Relaxed);
+}
+
+/// Currency gates are live: karma unlocks bulk-food vendor costs (priced free),
+/// UM/VM/RN unlock token values priced at the configured copper-per-token rate.
+#[test]
+fn currency_gates_are_live() {
+    pin_live_options();
+    let apples = Item::mock(12788, "Red Apples", 0);
+    assert!(apples.vendor_cost().is_none());
+    config::KARMA_ENABLED.store(true, Ordering::Relaxed);
+    assert!(apples.vendor_cost().is_some());
+
+    let ruby = Item::mock(79280, "Blood Ruby", 0);
+    assert!(ruby.token_value().is_none());
+    config::UM_ENABLED.store(true, Ordering::Relaxed);
+    config::UM_VALUE_BITS.store(100.0f64.to_bits(), Ordering::Relaxed);
+    // 38 UM per ruby at 100c each
+    assert_eq!(
+        ruby.token_value().map(|m| m.to_copper_value()),
+        Some(38 * 100)
+    );
+    // 2 UM of opportunity cost prices through Money math as well
+    assert_eq!(Money::new(0, 0, 2, 0, 0).to_copper_value(), 200);
+
+    let note = Item::mock(96052, "Research Note", 0);
+    assert!(note.token_value().is_none());
+    config::RN_ENABLED.store(true, Ordering::Relaxed);
+    config::RN_VALUE_BITS.store(500.0f64.to_bits(), Ordering::Relaxed);
+    assert_eq!(
+        note.token_value().map(|m| m.to_copper_value()),
+        Some(500)
+    );
+
+    // restore pinned defaults
+    config::KARMA_ENABLED.store(false, Ordering::Relaxed);
+    config::UM_ENABLED.store(false, Ordering::Relaxed);
+    config::RN_ENABLED.store(false, Ordering::Relaxed);
 }

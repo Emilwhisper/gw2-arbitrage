@@ -5,7 +5,7 @@ use std::cmp;
 use std::convert::TryFrom;
 use std::fmt;
 
-use crate::config::CONFIG;
+use crate::config::{rn_value, um_value, vm_value};
 
 // https://wiki.guildwars2.com/wiki/Trading_Post
 // Listing Fee (5%) — This nonrefundable cost covers listing and holding your items for sale. This
@@ -74,9 +74,9 @@ impl Money {
         // currency): karma costs still show up in displays and shopping lists,
         // but they never add to the copper cost used for profit math.
         self.copper
-            + self.um * CONFIG.um.unwrap_or(Rational32::zero())
-            + self.vm * CONFIG.vm.unwrap_or(Rational32::zero())
-            + self.rn * CONFIG.rn.unwrap_or(Rational32::zero())
+            + self.um * um_value().unwrap_or_else(Rational32::zero)
+            + self.vm * vm_value().unwrap_or_else(Rational32::zero)
+            + self.rn * rn_value().unwrap_or_else(Rational32::zero)
     }
     pub fn to_copper_value(&self) -> i32 {
         self.copper_value().ceil().to_integer()

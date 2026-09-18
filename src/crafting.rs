@@ -41,6 +41,10 @@ pub fn calculate_estimated_min_crafting_cost(
             && recipe.is_timegated()
         {
             None
+        } else if !config::INCLUDE_CHARGED_QUARTZ.load(std::sync::atomic::Ordering::Relaxed)
+            && recipe.is_charged_quartz()
+        {
+            None
         } else {
             let mut cost = Money::zero();
             for ingredient in &recipe.ingredients {
@@ -288,6 +292,11 @@ pub fn calculate_precise_min_crafting_cost(
     let crafting_cost_per_item = recipe.and_then(|recipe| {
         if !config::INCLUDE_TIMEGATED.load(std::sync::atomic::Ordering::Relaxed)
             && recipe.is_timegated()
+        {
+            return None;
+        }
+        if !config::INCLUDE_CHARGED_QUARTZ.load(std::sync::atomic::Ordering::Relaxed)
+            && recipe.is_charged_quartz()
         {
             return None;
         }
