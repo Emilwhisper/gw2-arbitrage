@@ -114,6 +114,84 @@ pub fn rn_value() -> Option<Rational32> {
     }
 }
 
+/// First-enable fallback copper-per-token rates for the GUI currency toggles.
+/// Community estimates, not market data — the Filters window always shows the
+/// active value so it can be tuned:
+/// - UM 10c: Magic-Warped Packets ran ~8c/UM and Bundles ~17c/UM in the 2017
+///   drop-rate research (1k packets / 7k bundles); 10c is the conservative pick
+///   since T6 prices fell further after PoF.
+/// - VM 30c: Trophy Shipments (250 VM + 1g) are the community conversion
+///   benchmark (~17c/VM on fast.farming-community.eu); 30c is conservative.
+/// - RN 500c: no clean conversion exists (RN come from research-salvaging
+///   crafted gear); deliberately conservative placeholder — tune it to your
+///   own craft-salvage cost.
+pub const DEFAULT_UM_VALUE: f64 = 10.0;
+pub const DEFAULT_VM_VALUE: f64 = 30.0;
+pub const DEFAULT_RN_VALUE: f64 = 500.0;
+
+/// Toggle/rate fingerprint captured when a list is computed. Compared against
+/// the live settings to decide whether the profitable universe may have grown
+/// (cheaper tokens / new sources), in which case a snapshot recompute cannot
+/// discover new items and the GUI must offer a full rescan instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScanRates {
+    pub karma: bool,
+    pub um: Option<f64>,
+    pub vm: Option<f64>,
+    pub rn: Option<f64>,
+    pub timegated: bool,
+    pub charged_quartz: bool,
+    pub ascended: bool,
+    pub patient: bool,
+}
+
+fn live_rate(enabled: &AtomicBool, bits: &AtomicU64) -> Option<f64> {
+    if enabled.load(Ordering::Relaxed) {
+        Some(f64::from_bits(bits.load(Ordering::Relaxed)))
+    } else {
+        None
+    }
+}
+
+/// Snapshot the current toggle/rate set (call when a list is computed).
+pub fn capture_scan_rates() -> ScanRates {
+    ScanRates {
+        karma: KARMA_ENABLED.load(Ordering::Relaxed),
+        um: live_rate(&UM_ENABLED, &UM_VALUE_BITS),
+        vm: live_rate(&VM_ENABLED, &VM_VALUE_BITS),
+        rn: live_rate(&RN_ENABLED, &RN_VALUE_BITS),
+        timegated: INCLUDE_TIMEGATED.load(Ordering::Relaxed),
+        charged_quartz: INCLUDE_CHARGED_QUARTZ.load(Ordering::Relaxed),
+        ascended: INCLUDE_ASCENDED.load(Ordering::Relaxed),
+        patient: PRICE_PATIENT.load(Ordering::Relaxed),
+    }
+}
+
+fn rate_grew(old: Option<f64>, new: Option<f64>) -> bool {
+    match (old, new) {
+        // disabled: can only shrink the universe
+        (_, None) => false,
+        // newly enabled: new chains become priceable
+        (None, Some(_)) => true,
+        // lowered rate: cheaper tokens make more chains profitable
+        (Some(o), Some(n)) => n < o,
+    }
+}
+
+/// Whether moving from `old` to `new` settings can make new items profitable.
+/// Raising rates or disabling sources only ever shrinks the list (a snapshot
+/// recompute is complete); anything else needs a full rescan to discover.
+pub fn universe_may_have_grown(old: &ScanRates, new: &ScanRates) -> bool {
+    (!old.karma && new.karma)
+        || (!old.timegated && new.timegated)
+        || (!old.charged_quartz && new.charged_quartz)
+        || (!old.ascended && new.ascended)
+        || (old.patient != new.patient)
+        || rate_grew(old.um, new.um)
+        || rate_grew(old.vm, new.vm)
+        || rate_grew(old.rn, new.rn)
+}
+
 #[derive(Debug, Default)]
 pub struct CraftingOptions {
     pub include_timegated: bool,

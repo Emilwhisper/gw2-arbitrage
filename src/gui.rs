@@ -229,12 +229,21 @@ struct App {
     /// `--count` runtime setting (limit items produced per recipe)
     count_limit_enabled: bool,
     count_limit_input: u32,
-    /// `--um/--vm/--rn` runtime settings: copper-per-token opportunity cost.
-    /// Enabled state lives in the `config::UM/VM/RN_ENABLED` atomics; these
-    /// fields are the editable rate drafts, applied on change.
-    um_rate_input: f64,
-    vm_rate_input: f64,
-    rn_rate_input: f64,
+    /// Rate/toggle fingerprint the current list was computed with (`None`
+    /// before the first run). Compared against the live settings to decide
+    /// whether a snapshot recompute is complete or a rescan is needed.
+    scan_rates: Option<crate::config::ScanRates>,
+    /// Set when settings changed since the list was computed in a way that
+    /// can make new items profitable (rate lowered / source newly enabled):
+    /// the list is then a subset and the UI offers a rescan.
+    rates_stale: bool,
+    /// Filters-window drafts for UM/VM/RN rates (copper per token), seeded
+    /// from the live atomics each time the window opens and stored on Apply.
+    /// (Settings edits these too when enabling a currency with no saved rate,
+    /// so both editors share one draft field and one source of truth.)
+    filter_um_rate: f64,
+    filter_vm_rate: f64,
+    filter_rn_rate: f64,
     prefs_dirty: bool,
     /// "Prefetch icons" progress: (done, total); `None` when not running
     prefetch_progress: Option<(usize, usize)>,
@@ -566,13 +575,15 @@ impl App {
                     1
                 }
             },
-            um_rate_input: f64::from_bits(
+            scan_rates: None,
+            rates_stale: false,
+            filter_um_rate: f64::from_bits(
                 crate::config::UM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
             ),
-            vm_rate_input: f64::from_bits(
+            filter_vm_rate: f64::from_bits(
                 crate::config::VM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
             ),
-            rn_rate_input: f64::from_bits(
+            filter_rn_rate: f64::from_bits(
                 crate::config::RN_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
             ),
             prefs_dirty: false,
@@ -592,6 +603,9 @@ impl App {
         crate::config::PROFIT_THRESHOLD.store(threshold, std::sync::atomic::Ordering::Relaxed);
         self.last_threshold = threshold;
         self.running = true;
+        // fingerprint the rate set this run computes with; the rescan banner
+        // compares live settings against it (refreshed again on AnalysisDone)
+        self.scan_rates = Some(crate::config::capture_scan_rates());
         self.status = if threshold < 0 {
             format!("Starting wide analysis ({})...", threshold_label(threshold))
         } else {
@@ -948,6 +962,7 @@ impl App {
     fn set_include_timegated(&mut self, enabled: bool) {
         crate::config::INCLUDE_TIMEGATED.store(enabled, std::sync::atomic::Ordering::Relaxed);
         self.write_config_key("include_timegated", Some(toml::Value::Boolean(enabled)));
+        self.refresh_rates_stale();
     }
 
     /// `--include-ascended`: allow recipes that need Piles of Bloodstone Dust,
@@ -956,6 +971,7 @@ impl App {
     fn set_include_ascended(&mut self, enabled: bool) {
         crate::config::INCLUDE_ASCENDED.store(enabled, std::sync::atomic::Ordering::Relaxed);
         self.write_config_key("include_ascended", Some(toml::Value::Boolean(enabled)));
+        self.refresh_rates_stale();
     }
 
     /// `--count`: limit the number of items produced per recipe. Disabled means
@@ -977,6 +993,7 @@ impl App {
             "include_charged_quartz",
             Some(toml::Value::Boolean(enabled)),
         );
+        self.refresh_rates_stale();
     }
 
     /// `--karma`: karma-gated ingredients count as free; the toggle only gates
@@ -985,6 +1002,7 @@ impl App {
         crate::config::KARMA_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
         let value = enabled.then(|| toml::Value::Float(1.0));
         self.write_currency_key("karma", value);
+        self.refresh_rates_stale();
     }
 
     /// `--um`: Unbound Magic opportunity cost in copper per token.
@@ -994,6 +1012,7 @@ impl App {
         crate::config::UM_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let value = enabled.then(|| toml::Value::Float(rate));
         self.write_currency_key("um", value);
+        self.refresh_rates_stale();
     }
 
     /// `--vm`: Volatile Magic opportunity cost in copper per token.
@@ -1003,6 +1022,7 @@ impl App {
         crate::config::VM_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let value = enabled.then(|| toml::Value::Float(rate));
         self.write_currency_key("vm", value);
+        self.refresh_rates_stale();
     }
 
     /// `--rn`: Research Note opportunity cost in copper per note.
@@ -1012,6 +1032,7 @@ impl App {
         crate::config::RN_VALUE_BITS.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let value = enabled.then(|| toml::Value::Float(rate));
         self.write_currency_key("rn", value);
+        self.refresh_rates_stale();
     }
 
     /// Write/remove a key inside the TOML `[currencies]` table (used for
@@ -1063,6 +1084,63 @@ impl App {
     /// Whether a velocity window's column is enabled in the settings.
     fn velocity_enabled(&self, col: SortColumn) -> bool {
         self.enabled_velocity.contains(&col)
+    }
+
+    /// Re-evaluate the rescan banner after any universe-affecting setting
+    /// changed: set when the live settings can make new items profitable
+    /// compared to the fingerprint the current list was computed with.
+    /// No fingerprint yet (never ran) means nothing can be stale.
+    fn refresh_rates_stale(&mut self) {
+        let now = crate::config::capture_scan_rates();
+        self.rates_stale = self
+            .scan_rates
+            .map(|old| crate::config::universe_may_have_grown(&old, &now))
+            .unwrap_or(false);
+    }
+
+    /// Seed the Filters-window rate drafts from the live atomics. Called each
+    /// time the window opens and whenever un-applied edits are discarded, so
+    /// Close/X always reverts to the applied values.
+    fn seed_rate_drafts(&mut self) {
+        self.filter_um_rate = f64::from_bits(
+            crate::config::UM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        self.filter_vm_rate = f64::from_bits(
+            crate::config::VM_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        self.filter_rn_rate = f64::from_bits(
+            crate::config::RN_VALUE_BITS.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
+
+    /// Recompute the profitable-items list from the in-memory market snapshot
+    /// (no network) after rate settings changed. Mirrors the `AnalysisDone`
+    /// handling: same wide-mode bound, same velocity respawn. Returns false
+    /// when there is nothing to recompute from, or when the snapshot lacks
+    /// order books the new estimate requires (caller should offer a rescan).
+    /// Open detail windows are closed: their numbers came from older rates.
+    fn recompute_from_snapshot(&mut self) -> bool {
+        let data = match &self.analysis {
+            Some(a) => a.clone(),
+            None => return false,
+        };
+        let snapshot = match &self.market_snapshot {
+            Some(s) => s,
+            None => return false,
+        };
+        match analysis::compute_profitable_items(&data, snapshot) {
+            Some(mut items) => {
+                if self.last_threshold < 0 {
+                    items.retain(|i| i.profit.to_copper_value() as i64 > self.last_threshold);
+                }
+                self.profitable_items = items;
+                self.detail_open = false;
+                self.detail = None;
+                self.spawn_velocity_workers();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Kick off background workers that fetch sell-velocity data for every
@@ -1268,6 +1346,10 @@ impl App {
                 Event::AnalysisDone(analysis, mut items, snapshot) => {
                     self.analysis = Some(analysis);
                     self.market_snapshot = Some(snapshot);
+                    // the list now matches the live settings: refresh the
+                    // fingerprint and clear any rescan banner
+                    self.scan_rates = Some(crate::config::capture_scan_rates());
+                    self.rates_stale = false;
                     if self.last_threshold < 0 {
                         // agreed bound for wide runs: keep totals above it
                         items.retain(|i| i.profit.to_copper_value() as i64 > self.last_threshold);
@@ -1483,6 +1565,7 @@ impl eframe::App for App {
                     self.prefs_dirty = true;
                     self.status =
                         "Price mode changed: applies to the next analysis run.".to_string();
+                    self.refresh_rates_stale();
                 }
                 if self.running {
                     ui.spinner();
@@ -1607,7 +1690,7 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.strong("Account currencies");
                     ui.small(
-                        "Same as the --karma/--um/--vm/--rn console options: gated recipes are excluded while disabled. Rates are copper per token. Apply on the next analysis run and are remembered.",
+                        "Same as the --karma/--um/--vm/--rn console options: gated recipes are excluded while disabled. The copper-per-token rate is edited in the Filters window and applies immediately there. First enable fills in a community-estimate default; a saved value always wins.",
                     );
                     let mut karma = crate::config::KARMA_ENABLED
                         .load(std::sync::atomic::Ordering::Relaxed);
@@ -1620,80 +1703,35 @@ impl eframe::App for App {
                     let mut um_on =
                         crate::config::UM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut um_on, "Enable Unbound Magic")
+                        .checkbox(&mut um_on, "Enable Unbound Magic (default 10c each)")
                         .changed()
                     {
-                        let rate = self.um_rate_input;
-                        self.set_um(um_on, rate);
-                    }
-                    if um_on {
-                        ui.horizontal(|ui| {
-                            let mut rate = self.um_rate_input;
-                            ui.label("Copper per Unbound Magic:");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut rate)
-                                        .speed(1.0)
-                                        .clamp_range(0.0..=1_000_000.0),
-                                )
-                                .changed()
-                            {
-                                self.um_rate_input = rate.max(0.0);
-                                self.set_um(true, self.um_rate_input);
-                            }
-                        });
+                        if um_on && self.filter_um_rate <= 0.0 {
+                            self.filter_um_rate = crate::config::DEFAULT_UM_VALUE;
+                        }
+                        self.set_um(um_on, self.filter_um_rate.max(0.0));
                     }
                     let mut vm_on =
                         crate::config::VM_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut vm_on, "Enable Volatile Magic")
+                        .checkbox(&mut vm_on, "Enable Volatile Magic (default 30c each)")
                         .changed()
                     {
-                        let rate = self.vm_rate_input;
-                        self.set_vm(vm_on, rate);
-                    }
-                    if vm_on {
-                        ui.horizontal(|ui| {
-                            let mut rate = self.vm_rate_input;
-                            ui.label("Copper per Volatile Magic:");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut rate)
-                                        .speed(1.0)
-                                        .clamp_range(0.0..=1_000_000.0),
-                                )
-                                .changed()
-                            {
-                                self.vm_rate_input = rate.max(0.0);
-                                self.set_vm(true, self.vm_rate_input);
-                            }
-                        });
+                        if vm_on && self.filter_vm_rate <= 0.0 {
+                            self.filter_vm_rate = crate::config::DEFAULT_VM_VALUE;
+                        }
+                        self.set_vm(vm_on, self.filter_vm_rate.max(0.0));
                     }
                     let mut rn_on =
                         crate::config::RN_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .checkbox(&mut rn_on, "Enable Research Notes")
+                        .checkbox(&mut rn_on, "Enable Research Notes (default 500c each)")
                         .changed()
                     {
-                        let rate = self.rn_rate_input;
-                        self.set_rn(rn_on, rate);
-                    }
-                    if rn_on {
-                        ui.horizontal(|ui| {
-                            let mut rate = self.rn_rate_input;
-                            ui.label("Copper per Research Note:");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut rate)
-                                        .speed(1.0)
-                                        .clamp_range(0.0..=1_000_000.0),
-                                )
-                                .changed()
-                            {
-                                self.rn_rate_input = rate.max(0.0);
-                                self.set_rn(true, self.rn_rate_input);
-                            }
-                        });
+                        if rn_on && self.filter_rn_rate <= 0.0 {
+                            self.filter_rn_rate = crate::config::DEFAULT_RN_VALUE;
+                        }
+                        self.set_rn(rn_on, self.filter_rn_rate.max(0.0));
                     }
                     ui.add_space(8.0);
                     ui.strong("Velocity windows");
@@ -1869,6 +1907,77 @@ impl eframe::App for App {
                             ui.label("copper");
                         });
                     }
+                    ui.add_space(4.0);
+                    // --- currency rates (only for sources enabled in Settings) ---
+                    let karma_on = crate::config::KARMA_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let cur_um_on = crate::config::UM_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let cur_vm_on = crate::config::VM_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let cur_rn_on = crate::config::RN_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if karma_on || cur_um_on || cur_vm_on || cur_rn_on {
+                        ui.strong("Currency rates (copper per token)");
+                        ui.small(
+                            "Same values as Settings, edited here so they apply together with the filters. Lower rates cheapen gated chains (more rows) but newly-profitable items may need a rescan to appear.",
+                        );
+                        if karma_on {
+                            ui.label("Karma: free");
+                        }
+                        if cur_um_on {
+                            ui.horizontal(|ui| {
+                                let mut v = self.filter_um_rate;
+                                ui.label("Unbound Magic:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut v)
+                                            .speed(1.0)
+                                            .clamp_range(0.0..=1_000_000.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.filter_um_rate = v.max(0.0);
+                                }
+                                ui.label("copper");
+                            });
+                        }
+                        if cur_vm_on {
+                            ui.horizontal(|ui| {
+                                let mut v = self.filter_vm_rate;
+                                ui.label("Volatile Magic:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut v)
+                                            .speed(1.0)
+                                            .clamp_range(0.0..=1_000_000.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.filter_vm_rate = v.max(0.0);
+                                }
+                                ui.label("copper");
+                            });
+                        }
+                        if cur_rn_on {
+                            ui.horizontal(|ui| {
+                                let mut v = self.filter_rn_rate;
+                                ui.label("Research Notes:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut v)
+                                            .speed(1.0)
+                                            .clamp_range(0.0..=1_000_000.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.filter_rn_rate = v.max(0.0);
+                                }
+                                ui.label("copper");
+                            });
+                        }
+                        ui.add_space(4.0);
+                    }
                     ui.add_space(8.0);
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -1884,6 +1993,53 @@ impl eframe::App for App {
                                     self.filter_draft.velocity_window = (*id).to_string();
                                 }
                             }
+                            // currency rates: store drafts for enabled sources, but
+                            // only when they actually changed (avoids a
+                            // pointless recompute + TOML write on every Apply).
+                            // set_* also refreshes the rescan banner state.
+                            let mut rates_touched = false;
+                            if cur_um_on {
+                                let rate = self.filter_um_rate.max(0.0);
+                                self.filter_um_rate = rate;
+                                let live = f64::from_bits(
+                                    crate::config::UM_VALUE_BITS
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                if rate != live {
+                                    self.set_um(true, rate);
+                                    rates_touched = true;
+                                }
+                            }
+                            if cur_vm_on {
+                                let rate = self.filter_vm_rate.max(0.0);
+                                self.filter_vm_rate = rate;
+                                let live = f64::from_bits(
+                                    crate::config::VM_VALUE_BITS
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                if rate != live {
+                                    self.set_vm(true, rate);
+                                    rates_touched = true;
+                                }
+                            }
+                            if cur_rn_on {
+                                let rate = self.filter_rn_rate.max(0.0);
+                                self.filter_rn_rate = rate;
+                                let live = f64::from_bits(
+                                    crate::config::RN_VALUE_BITS
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                if rate != live {
+                                    self.set_rn(true, rate);
+                                    rates_touched = true;
+                                }
+                            }
+                            // recompute the list from the market snapshot (no
+                            // downloads) when rates were stored and a list
+                            // exists; a lowered rate or new source can only be
+                            // fully discovered by a rescan (see banner).
+                            let recomputed =
+                                rates_touched && self.recompute_from_snapshot();
                             self.filter_applied = self.filter_draft.clone();
                             if self.save_filter_prefs() {
                                 let n = self.applied_filter_count();
@@ -1893,11 +2049,31 @@ impl eframe::App for App {
                                     format!("Filters applied ({} active)", n)
                                 };
                             }
+                            if rates_touched {
+                                self.status = if recomputed {
+                                    if self.rates_stale {
+                                        format!(
+                                            "Rates applied: recomputed {} items from snapshot (no downloads) — newly-profitable items may need a Rescan",
+                                            self.profitable_items.len()
+                                        )
+                                    } else {
+                                        format!(
+                                            "Rates applied: recomputed {} items from snapshot (no downloads)",
+                                            self.profitable_items.len()
+                                        )
+                                    }
+                                } else if self.analysis.is_some() {
+                                    "Rates applied but the snapshot lacks listings for the new estimate — Rescan to discover".to_string()
+                                } else {
+                                    "Rates saved: applies to the next analysis run".to_string()
+                                };
+                            }
                             close_filters = true;
                         }
                         if ui.button("Close").clicked() {
                             // discard edits that were never applied
                             self.filter_draft = self.filter_saved.clone();
+                            self.seed_rate_drafts();
                             close_filters = true;
                         }
                     });
@@ -1909,6 +2085,7 @@ impl eframe::App for App {
                 // the window X behaves like Close: discard un-applied edits
                 // (no-op after Apply, which already saved the drafts)
                 self.filter_draft = self.filter_saved.clone();
+                self.seed_rate_drafts();
             }
             self.show_filters = open;
         }
@@ -1930,6 +2107,22 @@ impl App {
         if self.sort_column.is_velocity() && !self.velocity_enabled(self.sort_column) {
             self.sort_column = SortColumn::TotalProfit;
             self.sort_desc = true;
+        }
+        // rescan banner: settings changed since this list was computed in a
+        // way that can make new items profitable (rate lowered / source newly
+        // enabled). The list above is a still-valid subset; Rescan does a full
+        // analysis in the same mode (normal/wide) to discover the rest.
+        if self.rates_stale && !self.running {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "\u{26a0} Rates changed since this scan — newly-profitable items may be missing.",
+                );
+                if ui.button("Rescan now").clicked() {
+                    self.spawn_analysis(self.last_threshold);
+                }
+            });
+            ui.separator();
         }
         // filters
         ui.horizontal(|ui| {
@@ -1980,6 +2173,7 @@ impl App {
             if ui.button(filters_label).clicked() {
                 // start from the last saved values each time the window opens
                 self.filter_draft = self.filter_saved.clone();
+                self.seed_rate_drafts();
                 self.show_filters = true;
             }
             ui.separator();

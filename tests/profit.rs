@@ -1605,3 +1605,112 @@ fn currency_gates_are_live() {
     config::UM_ENABLED.store(false, Ordering::Relaxed);
     config::RN_ENABLED.store(false, Ordering::Relaxed);
 }
+
+/// The shipped first-enable fallback rates (community estimates, always
+/// visible and editable in the Filters window).
+#[test]
+fn currency_default_rates() {
+    assert_eq!(config::DEFAULT_UM_VALUE, 10.0);
+    assert_eq!(config::DEFAULT_VM_VALUE, 30.0);
+    assert_eq!(config::DEFAULT_RN_VALUE, 500.0);
+}
+
+/// The rescan-banner rule: only changes that can make new items profitable
+/// (newly enabled sources, lowered rates, flipped price mode) report growth.
+/// Raising rates or disabling sources only ever shrinks the list, which a
+/// snapshot recompute covers completely.
+#[test]
+fn scan_rates_grown_matrix() {
+    use config::ScanRates;
+    let base = ScanRates {
+        karma: false,
+        um: Some(10.0),
+        vm: Some(30.0),
+        rn: Some(500.0),
+        timegated: true,
+        charged_quartz: true,
+        ascended: false,
+        patient: false,
+    };
+    // identical: no growth
+    assert!(!config::universe_may_have_grown(&base, &base));
+    // raised rates / disabled sources: shrink only
+    assert!(!config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            um: Some(50.0),
+            ..base
+        }
+    ));
+    assert!(!config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            rn: None,
+            ..base
+        }
+    ));
+    // lowered rates: growth
+    assert!(config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            um: Some(5.0),
+            ..base
+        }
+    ));
+    assert!(config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            vm: Some(1.0),
+            ..base
+        }
+    ));
+    // newly enabled sources: growth
+    assert!(config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            karma: true,
+            ..base
+        }
+    ));
+    assert!(config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            ascended: true,
+            ..base
+        }
+    ));
+    assert!(config::universe_may_have_grown(
+        &ScanRates {
+            charged_quartz: false,
+            ..base
+        },
+        &base
+    ));
+    assert!(config::universe_may_have_grown(
+        &ScanRates {
+            timegated: false,
+            ..base
+        },
+        &base
+    ));
+    // enabling a currency from scratch (None -> Some): growth
+    assert!(config::universe_may_have_grown(
+        &ScanRates { um: None, ..base },
+        &base
+    ));
+    // flipped price mode recomputes different books: growth either way
+    assert!(config::universe_may_have_grown(
+        &base,
+        &ScanRates {
+            patient: true,
+            ..base
+        }
+    ));
+    assert!(config::universe_may_have_grown(
+        &ScanRates {
+            patient: true,
+            ..base
+        },
+        &base
+    ));
+}
