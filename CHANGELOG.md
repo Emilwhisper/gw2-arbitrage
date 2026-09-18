@@ -1,5 +1,17 @@
 # Changelog
 
+### v2.4.0
+
+#### Features
+
+* Charged Quartz Crystal as an optional synthetic recipe (25x Quartz Crystal, patient-aware pricing) behind `--include-charged-quartz` plus `--include-timegated`, so celestial-inscription chains such as the Celestial Pearl weapons can appear.
+* Account currencies in the GUI Settings (Karma free toggle, Unbound/Volatile Magic and Research Notes enable toggles with copper-per-token rates), live via atomics and persisted to `gw2-arbitrage.toml`.
+* Currency rates editable in the Filters window with snapshot recompute (no downloads) on Apply, first-enable community-estimate defaults (UM 3c, VM 30c, RN 250c), and a stale-list warning with a Rescan button.
+
+#### Fixes
+
+* Import the `Zero` trait in `config.rs` for the live currency helper.
+
 ### v2.3.5
 
 #### Features
